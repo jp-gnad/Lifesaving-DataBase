@@ -3,15 +3,12 @@
 "use strict";
 
 const DATABASE_ID = "1WWuvjmEO_6pIMKmgUFadZEqfVROXXSfz";
-const DRIVE_DATABASE_URL = `https://drive.usercontent.google.com/download?id=${DATABASE_ID}&export=download&confirm=t`;
 const LOCAL_DATABASE_URL = "data/Lifesaving_Results.sqlite3";
-const DATABASE_VIEW_URL = `https://drive.google.com/file/d/${DATABASE_ID}/view?usp=sharing`;
 
 const state = {
   db: null,
   competitions: [],
   databaseModified: null,
-  databaseSource: "drive",
 };
 
 const ui = {
@@ -29,7 +26,7 @@ window.addEventListener("hashchange", route);
 
 async function start() {
   try {
-    setLoading("Datenbank wird direkt von Google Drive geladen.", "Download startet …", 4);
+    setLoading("Lokale Ergebnisdatenbank wird geladen.", "Download startet …", 4);
     const bytes = await downloadDatabase();
     setLoading("Datenbank wird im Browser geöffnet.", formatBytes(bytes.byteLength), 94);
 
@@ -43,9 +40,7 @@ async function start() {
 
     setLoading("Ansicht wird aufgebaut.", `${state.competitions.length} Wettkämpfe gefunden`, 100);
     ui.statusDot.classList.remove("is-loading");
-    ui.statusText.textContent = state.databaseSource === "drive"
-      ? `${state.competitions.length} Wettkämpfe · live aus Drive`
-      : `${state.competitions.length} Wettkämpfe · statischer Datenstand`;
+    ui.statusText.textContent = `${state.competitions.length} Wettkämpfe · lokale SQLite-Daten`;
 
     window.setTimeout(() => {
       ui.loading.hidden = true;
@@ -59,24 +54,13 @@ async function start() {
 }
 
 async function downloadDatabase() {
-  try {
-    return await downloadFrom(DRIVE_DATABASE_URL, "Google Drive");
-  } catch (driveError) {
-    console.info("Direkter Drive-Abruf nicht verfügbar; statischer Datenstand wird verwendet.", driveError);
-    state.databaseSource = "snapshot";
-    setLoading(
-      "Google Drive blockiert den direkten Browserabruf. Der veröffentlichte Datenstand wird geladen.",
-      "Statische Datenbank wird geöffnet …",
-      8,
-    );
-    return downloadFrom(LOCAL_DATABASE_URL, "GitHub Pages");
-  }
+  return downloadFrom(LOCAL_DATABASE_URL);
 }
 
-async function downloadFrom(url, sourceName) {
+async function downloadFrom(url) {
   const response = await fetch(url, { cache: "no-store" });
   if (!response.ok) {
-    throw new Error(`${sourceName} antwortet mit HTTP ${response.status}.`);
+    throw new Error(`Die lokale Datenbank antwortet mit HTTP ${response.status}.`);
   }
 
   state.databaseModified = response.headers.get("last-modified");
@@ -89,9 +73,7 @@ async function downloadFrom(url, sourceName) {
   const reader = response.body.getReader();
   const chunks = [];
   let received = 0;
-  const message = sourceName === "Google Drive"
-    ? "Datenbank wird direkt von Google Drive geladen."
-    : "Der veröffentlichte Datenstand wird geladen.";
+  const message = "Lokale Ergebnisdatenbank wird geladen.";
 
   while (true) {
     const { done, value } = await reader.read();
@@ -497,7 +479,6 @@ function createFactsPanel(competition) {
     ["Austragungsort", formatLocation(competition)],
     ["Umgebung", translateEnvironment(competition.environment)],
     ["Serie", competition.series_name],
-    ["Quelldatei", competition.original_filename || competition.current_filename],
     ["Importiert", formatDateTime(competition.last_processed_at)],
   ];
   for (const [label, value] of entries) {
@@ -508,13 +489,6 @@ function createFactsPanel(competition) {
   }
   panel.append(facts);
 
-  if (competition.source_file_id) {
-    const source = element("a", "source-link", "Originalquelle öffnen ↗");
-    source.href = `https://drive.google.com/file/d/${encodeURIComponent(competition.source_file_id)}/view`;
-    source.target = "_blank";
-    source.rel = "noopener noreferrer";
-    panel.append(source);
-  }
   return panel;
 }
 
@@ -598,24 +572,20 @@ function showFatalError(error) {
   ui.app.hidden = false;
   ui.statusDot.classList.remove("is-loading");
   ui.statusDot.classList.add("is-error");
-  ui.statusText.textContent = "Datenbank nicht erreichbar";
+  ui.statusText.textContent = "Lokale Datenbank nicht erreichbar";
   clear(ui.app);
 
   const card = element("section", "error-card");
   card.append(
-    element("p", "eyebrow", "Verbindungsfehler"),
+    element("p", "eyebrow", "Ladefehler"),
     element("h1", "", "Die Ergebnisdaten konnten nicht geladen werden."),
-    element("p", "", "Bitte prüfe die Internetverbindung und ob die Google-Drive-Datei weiterhin öffentlich als Betrachter freigegeben ist."),
+    element("p", "", "Bitte lade die Seite neu. Die lokale SQLite-Datei konnte nicht geöffnet werden."),
     element("code", "", error?.message || String(error)),
   );
   const retry = element("button", "retry-button", "Erneut versuchen");
   retry.type = "button";
   retry.addEventListener("click", () => window.location.reload());
-  const source = element("a", "source-link", "Datenquelle in Google Drive öffnen ↗");
-  source.href = DATABASE_VIEW_URL;
-  source.target = "_blank";
-  source.rel = "noopener noreferrer";
-  card.append(retry, source);
+  card.append(retry);
   ui.app.append(card);
 }
 

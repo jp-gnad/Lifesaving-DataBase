@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="description" content="Durchsuchbares Archiv internationaler Lifesaving-Wettkampfergebnisse.">
     <meta name="theme-color" content="#063b4f">
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self' https://drive.usercontent.google.com; img-src 'self' data:; script-src 'self'; style-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self'; img-src 'self' data:; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'">
     <title>Lifesaving Ergebnisarchiv</title>
     <link rel="stylesheet" href="styles.css">
     <link rel="icon" href="favicon.svg" type="image/svg+xml">
@@ -37,9 +37,9 @@
       <section class="loading-view" id="loading-view" aria-labelledby="loading-title">
         <div class="loader-card">
           <div class="lifebuoy" aria-hidden="true"></div>
-          <p class="eyebrow">Direkte Verbindung zu Google Drive</p>
+          <p class="eyebrow">Lokale SQLite-Datenbank</p>
           <h1 id="loading-title">Ergebnisarchiv wird vorbereitet</h1>
-          <p id="loading-message">Die aktuelle SQLite-Datenbank wird sicher in deinem Browser geöffnet.</p>
+          <p id="loading-message">Die Ergebnisdatenbank wird im Browser geöffnet.</p>
           <div class="progress-track" aria-hidden="true"><span id="progress-bar"></span></div>
           <p class="loading-meta" id="loading-meta">Verbindung wird hergestellt …</p>
         </div>
@@ -49,8 +49,8 @@
     </main>
 
     <footer class="site-footer">
-      <p>Statische Website · Daten direkt aus Google Drive · Verarbeitung ausschließlich im Browser</p>
-      <a href="https://drive.google.com/file/d/1WWuvjmEO_6pIMKmgUFadZEqfVROXXSfz/view?usp=sharing" target="_blank" rel="noopener noreferrer">Datenquelle öffnen</a>
+      <p>Statische Website · Lokale SQLite-Daten · Verarbeitung ausschließlich im Browser</p>
+      <span>Kein Backend</span>
     </footer>
 
     <noscript>
