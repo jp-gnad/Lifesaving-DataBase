@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="de">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="Durchsuchbares Archiv internationaler Lifesaving-Wettkampfergebnisse.">
+    <meta name="theme-color" content="#063b4f">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self' https://drive.usercontent.google.com; img-src 'self' data:; script-src 'self'; style-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'">
+    <title>Lifesaving Ergebnisarchiv</title>
+    <link rel="stylesheet" href="styles.css">
+    <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  </head>
+  <body>
+    <a class="skip-link" href="#inhalt">Zum Inhalt</a>
+    <header class="site-header">
+      <a class="brand" href="#/" aria-label="Zur Wettkampfübersicht">
+        <span class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 48 48" role="img">
+            <path d="M7 26c5-5 10-5 15 0s10 5 19-2" />
+            <path d="M7 34c5-5 10-5 15 0s10 5 19-2" />
+            <circle cx="28" cy="13" r="5" />
+            <path d="m13 20 8-7 9 7" />
+          </svg>
+        </span>
+        <span>
+          <strong>Lifesaving</strong>
+          <small>Ergebnisarchiv</small>
+        </span>
+      </a>
+      <div class="data-status" id="data-status" aria-live="polite">
+        <span class="status-dot is-loading" id="status-dot"></span>
+        <span id="status-text">Datenbank wird geladen …</span>
+      </div>
+    </header>
+
+    <main id="inhalt" tabindex="-1">
+      <section class="loading-view" id="loading-view" aria-labelledby="loading-title">
+        <div class="loader-card">
+          <div class="lifebuoy" aria-hidden="true"></div>
+          <p class="eyebrow">Direkte Verbindung zu Google Drive</p>
+          <h1 id="loading-title">Ergebnisarchiv wird vorbereitet</h1>
+          <p id="loading-message">Die aktuelle SQLite-Datenbank wird sicher in deinem Browser geöffnet.</p>
+          <div class="progress-track" aria-hidden="true"><span id="progress-bar"></span></div>
+          <p class="loading-meta" id="loading-meta">Verbindung wird hergestellt …</p>
+        </div>
+      </section>
+
+      <section class="app-view" id="app-view" hidden></section>
+    </main>
+
+    <footer class="site-footer">
+      <p>Statische Website · Daten direkt aus Google Drive · Verarbeitung ausschließlich im Browser</p>
+      <a href="https://drive.google.com/file/d/1WWuvjmEO_6pIMKmgUFadZEqfVROXXSfz/view?usp=sharing" target="_blank" rel="noopener noreferrer">Datenquelle öffnen</a>
+    </footer>
+
+    <noscript>
+      <div class="noscript">Diese Website benötigt JavaScript, um die SQLite-Datenbank im Browser zu lesen.</div>
+    </noscript>
+    <script src="vendor/sql.js/sql-wasm.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>
