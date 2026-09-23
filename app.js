@@ -144,7 +144,7 @@ function route() {
     renderOverview();
   }
   document.querySelector("#inhalt")?.focus({ preventScroll: true });
-  window.scrollTo({ top: 0, behavior: "instant" });
+  window.scrollTo({ top: 0, behavior: "auto" });
 }
 
 function renderOverview() {
