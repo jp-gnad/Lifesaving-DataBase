@@ -1,16 +1,16 @@
 # Lifesaving Ergebnisarchiv
 
-Eine reine statische GitHub-Pages-Website für die Datenbank `Lifesaving_Results.sqlite3` aus Google Drive.
+Eine reine statische GitHub-Pages-Website für `Lifesaving_Results.sqlite3`.
 
 ## Architektur
 
-Die Website versucht zuerst, die öffentliche Datei direkt von Google Drive abzurufen:
+Die Website lädt genau eine Datenquelle aus dem eigenen Repository:
 
 ```text
-GitHub Pages (HTML/CSS/JS) ──direkter HTTPS-Abruf──> öffentliche SQLite-Datei in Google Drive
+GitHub Pages (HTML/CSS/JS) ──> data/Lifesaving_Results.sqlite3
 ```
 
-Google Drive beantwortet browserseitige Cross-Origin-Downloads aktuell mit HTTP 403, obwohl die Datei öffentlich freigegeben ist. Deshalb fällt die Website automatisch auf die identische, unter `data/Lifesaving_Results.sqlite3` mitveröffentlichte Datei zurück. Es gibt weiterhin keinen eigenen Server, keinen Proxy, keine API und keinen Build-Schritt.
+Es gibt keinen eigenen Server, keinen Proxy, keine API und keinen Build-Schritt. Google Drive wird von der Website nicht kontaktiert.
 
 Die SQLite-Datei wird vollständig im Browser mit der lokal mitgelieferten WebAssembly-Version von [sql.js](https://sql.js.org/) gelesen.
 
@@ -20,7 +20,7 @@ Die SQLite-Datei wird vollständig im Browser mit der lokal mitgelieferten WebAs
 2. `data/Lifesaving_Results.sqlite3` durch diese Datei ersetzen.
 3. Die Änderung in den `main`-Branch pushen; GitHub Pages veröffentlicht den neuen Datenstand.
 
-Eine automatische Synchronisierung würde einen API-Schlüssel, Proxy oder serverseitigen Job erfordern und ist bewusst nicht eingebaut.
+Eine automatische Synchronisierung mit Google Drive würde einen API-Schlüssel, Proxy oder serverseitigen Job erfordern und ist bewusst nicht eingebaut.
 
 ## Lokal testen
 
@@ -36,11 +36,9 @@ Danach `http://localhost:8000` öffnen.
 
 Die Website ist für die Veröffentlichung direkt aus dem Root-Verzeichnis des `main`-Branches vorbereitet. Alle Pfade sind relativ, damit sie unter der Projekt-URL von GitHub Pages funktionieren.
 
-## Datenquelle
+## Sichtbarkeit
 
-- Drive-Datei-ID: `1WWuvjmEO_6pIMKmgUFadZEqfVROXXSfz`
-- Erwarteter Dateiname: `Lifesaving_Results.sqlite3`
-- Die Datei muss weiterhin für „Jeder mit dem Link – Betrachter“ freigegeben sein.
+Die Oberfläche enthält keinen Download-Link zur Datenbank. Da das Repository und GitHub Pages öffentlich sind, kann die SQLite-Datei technisch dennoch über ihre URL oder das Repository heruntergeladen werden. Ein echter Zugriffsschutz wäre nur mit einem Backend und Authentifizierung möglich.
 
 ## Drittanbieter-Code
 
