@@ -3,13 +3,15 @@
 "use strict";
 
 const DATABASE_ID = "1WWuvjmEO_6pIMKmgUFadZEqfVROXXSfz";
-const DATABASE_URL = `https://drive.usercontent.google.com/download?id=${DATABASE_ID}&export=download&confirm=t`;
+const DRIVE_DATABASE_URL = `https://drive.usercontent.google.com/download?id=${DATABASE_ID}&export=download&confirm=t`;
+const LOCAL_DATABASE_URL = "data/Lifesaving_Results.sqlite3";
 const DATABASE_VIEW_URL = `https://drive.google.com/file/d/${DATABASE_ID}/view?usp=sharing`;
 
 const state = {
   db: null,
   competitions: [],
   databaseModified: null,
+  databaseSource: "drive",
 };
 
 const ui = {
@@ -41,7 +43,9 @@ async function start() {
 
     setLoading("Ansicht wird aufgebaut.", `${state.competitions.length} Wettkämpfe gefunden`, 100);
     ui.statusDot.classList.remove("is-loading");
-    ui.statusText.textContent = `${state.competitions.length} Wettkämpfe · live aus Drive`;
+    ui.statusText.textContent = state.databaseSource === "drive"
+      ? `${state.competitions.length} Wettkämpfe · live aus Drive`
+      : `${state.competitions.length} Wettkämpfe · statischer Datenstand`;
 
     window.setTimeout(() => {
       ui.loading.hidden = true;
@@ -55,9 +59,24 @@ async function start() {
 }
 
 async function downloadDatabase() {
-  const response = await fetch(DATABASE_URL, { cache: "no-store" });
+  try {
+    return await downloadFrom(DRIVE_DATABASE_URL, "Google Drive");
+  } catch (driveError) {
+    console.info("Direkter Drive-Abruf nicht verfügbar; statischer Datenstand wird verwendet.", driveError);
+    state.databaseSource = "snapshot";
+    setLoading(
+      "Google Drive blockiert den direkten Browserabruf. Der veröffentlichte Datenstand wird geladen.",
+      "Statische Datenbank wird geöffnet …",
+      8,
+    );
+    return downloadFrom(LOCAL_DATABASE_URL, "GitHub Pages");
+  }
+}
+
+async function downloadFrom(url, sourceName) {
+  const response = await fetch(url, { cache: "no-store" });
   if (!response.ok) {
-    throw new Error(`Google Drive antwortet mit HTTP ${response.status}.`);
+    throw new Error(`${sourceName} antwortet mit HTTP ${response.status}.`);
   }
 
   state.databaseModified = response.headers.get("last-modified");
@@ -70,6 +89,9 @@ async function downloadDatabase() {
   const reader = response.body.getReader();
   const chunks = [];
   let received = 0;
+  const message = sourceName === "Google Drive"
+    ? "Datenbank wird direkt von Google Drive geladen."
+    : "Der veröffentlichte Datenstand wird geladen.";
 
   while (true) {
     const { done, value } = await reader.read();
@@ -78,7 +100,7 @@ async function downloadDatabase() {
     received += value.length;
     const percent = total ? Math.min(90, 7 + (received / total) * 83) : 45;
     setLoading(
-      "Datenbank wird direkt von Google Drive geladen.",
+      message,
       total ? `${formatBytes(received)} von ${formatBytes(total)}` : formatBytes(received),
       percent,
     );

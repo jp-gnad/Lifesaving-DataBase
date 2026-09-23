@@ -1,16 +1,26 @@
 # Lifesaving Ergebnisarchiv
 
-Eine reine statische GitHub-Pages-Website für die Datenbank `Lifesaving_Results.sqlite3` in Google Drive.
+Eine reine statische GitHub-Pages-Website für die Datenbank `Lifesaving_Results.sqlite3` aus Google Drive.
 
 ## Architektur
 
-Zur Laufzeit gibt es genau eine Datenverbindung:
+Die Website versucht zuerst, die öffentliche Datei direkt von Google Drive abzurufen:
 
 ```text
 GitHub Pages (HTML/CSS/JS) ──direkter HTTPS-Abruf──> öffentliche SQLite-Datei in Google Drive
 ```
 
-Die SQLite-Datei wird im Browser geladen und mit der lokal mitgelieferten WebAssembly-Version von [sql.js](https://sql.js.org/) gelesen. Es gibt keinen eigenen Server, keinen Proxy, keine API und keinen Build-Schritt.
+Google Drive beantwortet browserseitige Cross-Origin-Downloads aktuell mit HTTP 403, obwohl die Datei öffentlich freigegeben ist. Deshalb fällt die Website automatisch auf die identische, unter `data/Lifesaving_Results.sqlite3` mitveröffentlichte Datei zurück. Es gibt weiterhin keinen eigenen Server, keinen Proxy, keine API und keinen Build-Schritt.
+
+Die SQLite-Datei wird vollständig im Browser mit der lokal mitgelieferten WebAssembly-Version von [sql.js](https://sql.js.org/) gelesen.
+
+## Daten aktualisieren
+
+1. Die aktuelle `Lifesaving_Results.sqlite3` aus Google Drive herunterladen.
+2. `data/Lifesaving_Results.sqlite3` durch diese Datei ersetzen.
+3. Die Änderung in den `main`-Branch pushen; GitHub Pages veröffentlicht den neuen Datenstand.
+
+Eine automatische Synchronisierung würde einen API-Schlüssel, Proxy oder serverseitigen Job erfordern und ist bewusst nicht eingebaut.
 
 ## Lokal testen
 
