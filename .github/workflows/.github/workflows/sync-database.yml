@@ -1,0 +1,87 @@
+name: Sync Lifesaving Database
+
+on:
+  # Automatisch alle 6 Stunden
+  schedule:
+    - cron: "0 */6 * * *"
+
+  # Ermöglicht zusätzlich einen manuellen Start
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync-database:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Repository auschecken
+        uses: actions/checkout@v7
+
+      - name: Python einrichten
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: gdown installieren
+        run: pip install gdown
+
+      - name: Datenbank aus Google Drive herunterladen
+        run: |
+          mkdir -p .tmp
+          gdown "1WWuvjmEO_6pIMKmgUFadZEqfVROXXSfz" \
+            -O ".tmp/Lifesaving_Results.sqlite3"
+
+      - name: SQLite-Datenbank prüfen
+        run: |
+          python - <<'PY'
+          import sqlite3
+          import sys
+
+          path = ".tmp/Lifesaving_Results.sqlite3"
+
+          try:
+              connection = sqlite3.connect(path)
+              result = connection.execute("PRAGMA quick_check;").fetchone()
+              connection.close()
+          except Exception as exc:
+              print(f"SQLite-Datei konnte nicht geöffnet werden: {exc}")
+              sys.exit(1)
+
+          if not result or result[0] != "ok":
+              print(f"SQLite quick_check fehlgeschlagen: {result}")
+              sys.exit(1)
+
+          print("SQLite-Datenbank ist gültig.")
+          PY
+
+      - name: Auf Änderungen prüfen
+        id: compare
+        run: |
+          if cmp -s \
+            ".tmp/Lifesaving_Results.sqlite3" \
+            "data/Lifesaving_Results.sqlite3"; then
+
+            echo "Keine Änderung der Datenbank."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+
+          else
+
+            echo "Neue Datenbankversion gefunden."
+            mv \
+              ".tmp/Lifesaving_Results.sqlite3" \
+              "data/Lifesaving_Results.sqlite3"
+
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Änderung committen und pushen
+        if: steps.compare.outputs.changed == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add data/Lifesaving_Results.sqlite3
+          git commit -m "Update Lifesaving Results database"
+          git push
