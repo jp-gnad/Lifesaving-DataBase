@@ -8,6 +8,7 @@ const LOCAL_DATABASE_URL = "data/Lifesaving_Results.sqlite3";
 const state = {
   db: null,
   competitions: [],
+  participantIndex: null,
   databaseModified: null,
 };
 
@@ -179,6 +180,16 @@ function renderOverview() {
   search.autocomplete = "off";
   searchField.append(searchLabel, search, element("span", "search-icon"));
 
+  const participantField = element("div", "field");
+  const participantLabel = element("label", "", "Person oder Club durchsuchen");
+  participantLabel.htmlFor = "participant-search";
+  const participantSearch = element("input");
+  participantSearch.id = "participant-search";
+  participantSearch.type = "search";
+  participantSearch.placeholder = "Person oder Club …";
+  participantSearch.autocomplete = "off";
+  participantField.append(participantLabel, participantSearch, element("span", "search-icon"));
+
   const filterField = element("div", "field");
   const filterLabel = element("label", "", "Umgebung filtern");
   filterLabel.htmlFor = "environment-filter";
@@ -188,7 +199,7 @@ function renderOverview() {
   const environments = [...new Set(state.competitions.map((item) => item.environment).filter(Boolean))].sort(localeSort);
   for (const value of environments) addOption(filter, value, translateEnvironment(value));
   filterField.append(filterLabel, filter);
-  toolbar.append(searchField, filterField);
+  toolbar.append(searchField, participantField, filterField);
 
   const heading = element("div", "results-heading");
   heading.append(element("h2", "", "Alle Wettkämpfe"), element("span", "results-count"));
@@ -198,6 +209,8 @@ function renderOverview() {
 
   const renderCards = () => {
     const term = normalize(search.value);
+    const participantTerm = participantSearch.value;
+    const participantMatches = findCompetitionParticipantMatches(participantTerm);
     const environment = filter.value;
     const visible = state.competitions.filter((competition) => {
       const haystack = normalize([
@@ -209,16 +222,25 @@ function renderOverview() {
         competition.country_name,
         competition.series_name,
       ].join(" "));
-      return (!term || haystack.includes(term)) && (!environment || competition.environment === environment);
+      return (!term || haystack.includes(term))
+        && (!participantTerm.trim() || participantMatches.has(Number(competition.id)))
+        && (!environment || competition.environment === environment);
     });
 
     clear(list);
-    for (const competition of visible) list.append(createCompetitionCard(competition));
+    for (const competition of visible) {
+      list.append(createCompetitionCard(
+        competition,
+        participantMatches.get(Number(competition.id)) || 0,
+        Boolean(participantTerm.trim()),
+      ));
+    }
     heading.querySelector(".results-count").textContent = `${visible.length} von ${state.competitions.length}`;
     empty.hidden = visible.length !== 0;
   };
 
   search.addEventListener("input", renderCards);
+  participantSearch.addEventListener("input", debounce(renderCards));
   filter.addEventListener("change", renderCards);
   renderCards();
 
@@ -226,7 +248,7 @@ function renderOverview() {
   ui.app.append(shell);
 }
 
-function createCompetitionCard(competition) {
+function createCompetitionCard(competition, participantMatchCount = 0, showParticipantMatches = false) {
   const card = element("article", "competition-card");
   const kicker = element("div", "card-kicker");
   kicker.append(element("span", "", competition.edition_label || yearFromDate(competition.start_date) || "Wettkampf"));
@@ -247,6 +269,9 @@ function createCompetitionCard(competition) {
     element("span", "chip is-ocean", `${formatNumber(competition.event_count)} Disziplinen`),
     element("span", "chip is-accent", `${formatNumber(competition.result_count)} Resultate`),
   );
+  if (showParticipantMatches) {
+    stats.append(element("span", "chip is-match", `${formatNumber(participantMatchCount)} passende Einträge`));
+  }
   card.append(kicker, title, meta, stats);
   return card;
 }
@@ -346,7 +371,8 @@ function createEventsPanel(competitionId) {
     element("p", "panel-intro", "Eine Disziplin öffnen, um alle erfassten Platzierungen, Zeiten und Punkte zu sehen."),
   );
 
-  const tools = element("div", "event-tools field");
+  const tools = element("div", "event-tools");
+  const eventField = element("div", "field");
   const label = element("label", "", "Disziplinen durchsuchen");
   label.htmlFor = "event-search";
   const input = element("input");
@@ -354,31 +380,56 @@ function createEventsPanel(competitionId) {
   input.type = "search";
   input.placeholder = "Disziplin, Kategorie oder Geschlecht …";
   input.autocomplete = "off";
-  tools.append(label, input, element("span", "search-icon"));
+  eventField.append(label, input, element("span", "search-icon"));
+
+  const participantField = element("div", "field");
+  const participantLabel = element("label", "", "Person oder Club in diesem Wettkampf durchsuchen");
+  participantLabel.htmlFor = "event-participant-search";
+  const participantInput = element("input");
+  participantInput.id = "event-participant-search";
+  participantInput.type = "search";
+  participantInput.placeholder = "Person oder Club …";
+  participantInput.autocomplete = "off";
+  participantField.append(participantLabel, participantInput, element("span", "search-icon"));
+  tools.append(eventField, participantField);
 
   const list = element("div", "event-list");
   const empty = element("div", "empty-state", "Keine passende Disziplin gefunden.");
   empty.hidden = true;
 
-  const cards = events.map((event) => ({ event, card: createEventCard(event) }));
+  const cards = events.map((event) => ({
+    event,
+    ...createEventCard(event, () => participantInput.value),
+  }));
   for (const item of cards) list.append(item.card);
 
-  input.addEventListener("input", () => {
+  const filterCards = (refreshOpenResults = false) => {
     const term = normalize(input.value);
+    const participantTerm = participantInput.value;
+    const participantMatches = findEventParticipantMatches(competitionId, participantTerm);
     let visible = 0;
-    for (const { event, card } of cards) {
-      const matches = !term || normalize([event.event_name, event.source_title_raw, event.discipline_name, event.category_label, event.gender].join(" ")).includes(term);
+    for (const { event, card, body, matchChip } of cards) {
+      const matchesEvent = !term || normalize([event.event_name, event.source_title_raw, event.discipline_name, event.category_label, event.gender].join(" ")).includes(term);
+      const matchCount = participantMatches.get(Number(event.id)) || 0;
+      const matchesParticipant = !participantTerm.trim() || matchCount > 0;
+      const matches = matchesEvent && matchesParticipant;
       card.hidden = !matches;
+      matchChip.hidden = !participantTerm.trim();
+      matchChip.textContent = `${formatNumber(matchCount)} Treffer`;
+      if (refreshOpenResults && card.open) renderEventResults(event.id, body, participantTerm);
       if (matches) visible += 1;
     }
     empty.hidden = visible !== 0;
-  });
+  };
+
+  input.addEventListener("input", () => filterCards(false));
+  participantInput.addEventListener("input", debounce(() => filterCards(true)));
 
   panel.append(tools, list, empty);
   return panel;
 }
 
-function createEventCard(event) {
+function createEventCard(event, getParticipantTerm) {
   const details = element("details", "event-card");
   const summary = element("summary");
   const name = element("span", "event-name");
@@ -386,7 +437,12 @@ function createEventCard(event) {
     element("strong", "", event.source_title_raw || event.event_name),
     element("small", "", [event.discipline_name, translateGender(event.gender), event.category_label].filter(Boolean).join(" · ")),
   );
-  summary.append(name, element("span", "chip is-ocean", `${formatNumber(event.result_count)} Resultate`));
+  const stats = element("span", "event-summary-stats");
+  stats.append(element("span", "chip is-ocean", `${formatNumber(event.result_count)} Resultate`));
+  const matchChip = element("span", "chip is-match", "");
+  matchChip.hidden = true;
+  stats.append(matchChip);
+  summary.append(name, stats);
   const body = element("div", "event-body");
   body.append(element("div", "event-loading", "Ergebnisse werden beim Öffnen geladen."));
   details.append(summary, body);
@@ -394,13 +450,14 @@ function createEventCard(event) {
   details.addEventListener("toggle", () => {
     if (details.open && !details.dataset.loaded) {
       details.dataset.loaded = "true";
-      renderEventResults(event.id, body);
+      renderEventResults(event.id, body, getParticipantTerm());
     }
   });
-  return details;
+  return { card: details, body, matchChip };
 }
 
-function renderEventResults(eventId, container) {
+function renderEventResults(eventId, container, participantTerm = "") {
+  const normalizedTerm = normalize(participantTerm);
   const results = query(`
     SELECT
       r.rank_numeric,
@@ -428,11 +485,17 @@ function renderEventResults(eventId, container) {
     WHERE e.event_id = ?
     ORDER BY COALESCE(ro.sequence_no, 9999), COALESCE(ro.heat_no, 9999),
              CASE WHEN r.rank_numeric IS NULL THEN 1 ELSE 0 END, r.rank_numeric, e.display_name COLLATE NOCASE
-  `, [eventId]);
+  `, [eventId]).filter((result) => !normalizedTerm || normalize(`${result.display_name || ""} ${result.club_name || ""}`).includes(normalizedTerm));
 
   clear(container);
   if (!results.length) {
-    container.append(element("div", "empty-state", "Für diese Disziplin sind noch keine Einzelresultate gespeichert."));
+    container.append(element(
+      "div",
+      "empty-state",
+      participantTerm.trim()
+        ? "Keine Resultate passen zu dieser Personen- oder Clubsuche."
+        : "Für diese Disziplin sind noch keine Einzelresultate gespeichert.",
+    ));
     return;
   }
 
@@ -605,6 +668,52 @@ function queryOne(sql, params = []) {
   return query(sql, params)[0] || null;
 }
 
+function loadParticipantIndex() {
+  if (state.participantIndex) return state.participantIndex;
+  state.participantIndex = query(`
+    SELECT DISTINCT
+      ce.competition_id,
+      e.event_id,
+      e.id AS entry_id,
+      e.display_name,
+      cl.name AS club_name
+    FROM entries e
+    JOIN competition_events ce ON ce.id = e.event_id
+    JOIN results r ON r.entry_id = e.id
+    LEFT JOIN clubs cl ON cl.id = e.club_id
+  `).map((entry) => ({
+    ...entry,
+    searchText: normalize(`${entry.display_name || ""} ${entry.club_name || ""}`),
+  }));
+  return state.participantIndex;
+}
+
+function findCompetitionParticipantMatches(term) {
+  const needle = normalize(term);
+  const matches = new Map();
+  if (!needle) return matches;
+
+  for (const entry of loadParticipantIndex()) {
+    if (!entry.searchText.includes(needle)) continue;
+    const competitionId = Number(entry.competition_id);
+    matches.set(competitionId, (matches.get(competitionId) || 0) + 1);
+  }
+  return matches;
+}
+
+function findEventParticipantMatches(competitionId, term) {
+  const needle = normalize(term);
+  const matches = new Map();
+  if (!needle) return matches;
+
+  for (const entry of loadParticipantIndex()) {
+    if (Number(entry.competition_id) !== Number(competitionId) || !entry.searchText.includes(needle)) continue;
+    const eventId = Number(entry.event_id);
+    matches.set(eventId, (matches.get(eventId) || 0) + 1);
+  }
+  return matches;
+}
+
 function element(tag, className = "", text) {
   const node = document.createElement(tag);
   if (className) node.className = className;
@@ -634,6 +743,14 @@ function groupBy(items, getKey) {
 
 function normalize(value) {
   return String(value || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLocaleLowerCase("de").trim();
+}
+
+function debounce(callback, delay = 140) {
+  let timeout;
+  return (...args) => {
+    window.clearTimeout(timeout);
+    timeout = window.setTimeout(() => callback(...args), delay);
+  };
 }
 
 function localeSort(a, b) {
