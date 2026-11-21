@@ -16,7 +16,8 @@ const scopes = [
   ["person", "Person"],
   ["club", "Club"],
 ];
-const overviewFilters = { q: "", scope: "all", year: "", country: "", environment: "", sort: "" };
+const competitionCategories = ["Ocean", "Beach", "Pool", "SERC", "IRB", "SpeedLifesaving"];
+const overviewFilters = { q: "", scope: "all", year: "", country: "", category: "", sort: "" };
 
 let db;
 let stats;
@@ -89,7 +90,7 @@ function loadArchive() {
            (SELECT COUNT(*) FROM results) AS results
   `)[0];
   competitions = query(`
-    SELECT c.id, c.name, c.edition_label, c.start_date, c.end_date, c.environment,
+    SELECT c.id, c.parent_competition_id, c.name, c.edition_label, c.start_date, c.end_date, c.environment,
            v.name AS venue, v.city, co.name AS country, cs.name AS series
     FROM competitions c
     LEFT JOIN venues v ON v.id = c.venue_id
@@ -105,6 +106,7 @@ function loadArchive() {
     )
     SELECT ce.id, ce.competition_id, ce.external_event_code, ce.event_name, ce.source_title_raw,
            ce.gender, ce.discipline_id, d.canonical_name AS discipline,
+           d.environment AS discipline_environment, d.discipline_kind, ce.event_kind,
            cat.label AS category, COALESCE(rc.result_count, 0) AS result_count
     FROM competition_events ce
     JOIN disciplines d ON d.id = ce.discipline_id
@@ -123,22 +125,59 @@ function loadArchive() {
     const events = eventsByCompetition.get(competition.id) || [];
     competition.year = [competition.start_date, competition.edition_label, competition.name]
       .join(" ").match(/\b(?:19|20)\d{2}\b/)?.[0] || "";
-    competition.environment = environmentLabel(competition.environment);
+    competition.categories = new Set(events.flatMap(eventCategories));
+    const formats = namedFormats([competition.name, competition.series].join(" "));
+    formats.forEach((format) => competition.categories.add(format));
+    if (!competition.categories.size) {
+      environmentCategories(competition.environment).forEach((category) => competition.categories.add(category));
+    }
     competition.resultCount = events.reduce((total, event) => total + event.result_count, 0);
     competition.eventCount = events.length;
-    competition.terms = normalize([competition.name, competition.edition_label, competition.year,
-      competition.city, competition.country, competition.venue, competition.series, competition.environment].join(" "));
   }
   competitionsById = new Map(competitions.map((competition) => [competition.id, competition]));
+  for (const competition of competitions) {
+    const visited = new Set([competition.id]);
+    let parent = competitionsById.get(competition.parent_competition_id);
+    while (parent && !visited.has(parent.id)) {
+      competition.categories.forEach((category) => parent.categories.add(category));
+      visited.add(parent.id);
+      parent = competitionsById.get(parent.parent_competition_id);
+    }
+  }
+  for (const competition of competitions) {
+    competition.categoryLabel = competitionCategories.filter((category) => competition.categories.has(category)).join(" · ");
+    competition.terms = normalize([competition.name, competition.edition_label, competition.year,
+      competition.city, competition.country, competition.venue, competition.series, competition.categoryLabel].join(" "));
+  }
 }
 
-function environmentLabel(value = "") {
-  const key = (value || "").toLowerCase().replaceAll("_", " ").trim();
-  return ({
-    pool: "Pool", ocean: "Ocean", beach: "Beach", "open water": "Open Water",
-    mixed: "Gemischt", "mixed pool and ocean": "Pool / Ocean",
-    "beach/open water": "Beach / Open Water", "ocean/beach": "Ocean / Beach",
-  })[key] || value || "";
+function namedFormats(text) {
+  return [
+    ["SERC", /\b(?:serc|simulated emergency response)\b/i],
+    ["IRB", /\b(?:irb|inflatable rescue boats?)\b/i],
+    ["SpeedLifesaving", /\bspeed[\s-]*life[\s-]*saving\b/i],
+  ].filter(([, pattern]) => pattern.test(text)).map(([category]) => category);
+}
+
+function eventCategories(event) {
+  const formats = namedFormats([
+    event.discipline_kind, event.event_kind, event.discipline, event.event_name, event.source_title_raw,
+  ].join(" "));
+  if (formats.length) return formats;
+
+  // Some imports use a shared beach/open-water environment for both types of races.
+  if (/\bbeach\b|\bmarch past\b/i.test(event.discipline)) return ["Beach"];
+  if (/\bboard (?:race|relay|rescue)\b|\brescue tube rescue\b/i.test(event.discipline)) return ["Ocean"];
+  return environmentCategories(event.discipline_environment);
+}
+
+function environmentCategories(environment) {
+  const label = normalize(environment).replaceAll("_", " ");
+  return [
+    ["Ocean", /\b(?:ocean|open water)\b/],
+    ["Beach", /\bbeach\b/],
+    ["Pool", /\bpool\b/],
+  ].filter(([, pattern]) => pattern.test(label)).map(([category]) => category);
 }
 
 function route() {
@@ -171,7 +210,7 @@ function renderOverview() {
   const filters = createFilters("overview", overviewFilters, scopes, [
     ["year", "Jahr", options(competitions, "year").reverse()],
     ["country", "Land", options(competitions, "country")],
-    ["environment", "Umgebung", options(competitions, "environment")],
+    ["category", "Kategorie", competitionCategories.map((category) => [category, category]), "Alles"],
     ["sort", "Sortierung", [["oldest", "Älteste zuerst"], ["name", "Name A–Z"]], "Neueste zuerst"],
   ], update);
   section.append(heading, filters, list, empty);
@@ -180,13 +219,13 @@ function renderOverview() {
   return page;
 
   function update() {
-    const { q, scope, year, country, environment, sort } = overviewFilters;
+    const { q, scope, year, country, category, sort } = overviewFilters;
     const tokens = searchTokens(q);
     const rows = [];
     for (const competition of competitions) {
       if (year && year !== competition.year) continue;
       if (country && country !== (competition.country || "(unknown)")) continue;
-      if (environment && environment !== (competition.environment || "(unknown)")) continue;
+      if (category && !competition.categories.has(category)) continue;
       let context = null;
       if (tokens.length) {
         const events = eventsByCompetition.get(competition.id) || [];
@@ -226,7 +265,7 @@ function competitionLink(competition, scope, q) {
   link.href = `#/wettkampf/${competition.id}${params}`;
   const name = element("span");
   name.append(element("strong", "", competition.name));
-  const place = [dateLabel(competition), ...new Set([competition.city, competition.country].filter(Boolean)), competition.environment].filter(Boolean).join(" · ");
+  const place = [dateLabel(competition), ...new Set([competition.city, competition.country].filter(Boolean)), competition.categoryLabel].filter(Boolean).join(" · ");
   if (place) name.append(element("small", "", place));
   link.append(name, element("span", "row-meta",
     `${number.format(competition.eventCount)} Austragungen · ${number.format(competition.resultCount)} Ergebnisse`),
@@ -247,7 +286,7 @@ function renderCompetition(competition, params) {
 
   document.title = `${competition.name} · Lifesaving`;
   const header = element("header", "detail-header");
-  const meta = [dateLabel(competition), ...new Set([competition.venue, competition.city, competition.country].filter(Boolean)), competition.environment].filter(Boolean);
+  const meta = [dateLabel(competition), ...new Set([competition.venue, competition.city, competition.country].filter(Boolean)), competition.categoryLabel].filter(Boolean);
   header.append(element("h1", "", competition.name));
   if (meta.length) header.append(element("p", "muted", meta.join(" · ")));
   const results = createEventsPanel(competition.id, params);
@@ -324,7 +363,7 @@ function createEventsPanel(competitionId, params) {
   const empty = element("p", "empty-state", "Keine Disziplinen gefunden.");
   const cards = new Map();
   panel.append(heading, createFilters("event", filters, eventScopes, [
-    ["category", "Kategorie", options(events, "category")],
+    ["category", "Wertungsklasse", options(events, "category")],
     ["gender", "Geschlecht", options(events, "gender")],
   ], update), list, empty);
   update();
