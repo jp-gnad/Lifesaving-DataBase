@@ -60,7 +60,9 @@ async function start() {
 
 async function readDatabase(response) {
   const size = Number(response.headers.get("content-length"));
-  if (!response.body || !size || response.headers.get("content-encoding")) return response.arrayBuffer();
+  if (!response.body || !size || response.headers.get("content-encoding")) {
+    return new Uint8Array(await response.arrayBuffer());
+  }
   const progress = document.querySelector("#loading-progress");
   progress.max = size;
   progress.value = 0;
