@@ -1,659 +1,642 @@
 /* global initSqlJs */
-
 "use strict";
 
+const DATABASE_URL = "data/Lifesaving_Results.sqlite3";
 const DATABASE_ID = "1WWuvjmEO_6pIMKmgUFadZEqfVROXXSfz";
-const LOCAL_DATABASE_URL = "data/Lifesaving_Results.sqlite3";
+const app = document.querySelector("#app-view");
+const main = document.querySelector("#inhalt");
+const loading = document.querySelector("#loading-view");
+const number = new Intl.NumberFormat("de-DE");
+const decimal = new Intl.NumberFormat("de-DE", { maximumFractionDigits: 2 });
+const collator = new Intl.Collator("de", { sensitivity: "base", numeric: true });
+const scopes = [
+  ["all", "Alles"],
+  ["competition", "Wettkampf"],
+  ["discipline", "Disziplin"],
+  ["person", "Person"],
+  ["club", "Club"],
+];
+const overviewFilters = { q: "", scope: "all", year: "", country: "", environment: "", sort: "" };
 
-const state = {
-  db: null,
-  competitions: [],
-  participantIndex: null,
-  databaseModified: null,
-};
+let db;
+let stats;
+let competitions;
+let competitionsById;
+let eventsByCompetition;
+let memberNames;
+let participantIndex;
 
-const ui = {
-  app: document.querySelector("#app-view"),
-  loading: document.querySelector("#loading-view"),
-  loadingMessage: document.querySelector("#loading-message"),
-  loadingMeta: document.querySelector("#loading-meta"),
-  progress: document.querySelector("#progress-bar"),
-  statusDot: document.querySelector("#status-dot"),
-  statusText: document.querySelector("#status-text"),
-};
-
-document.addEventListener("DOMContentLoaded", start);
-window.addEventListener("hashchange", route);
+window.addEventListener("hashchange", () => {
+  if (competitions && location.hash !== "#inhalt") route();
+});
+start();
 
 async function start() {
   try {
-    setLoading("Lokale Ergebnisdatenbank wird geladen.", "Download startet …", 4);
-    const bytes = await downloadDatabase();
-    setLoading("Datenbank wird im Browser geöffnet.", formatBytes(bytes.byteLength), 94);
-
-    const SQL = await initSqlJs({
-      locateFile: () => "vendor/sql.js/sql-wasm.wasm",
-    });
-
-    state.db = new SQL.Database(bytes);
-    verifyDatabase();
-    state.competitions = loadCompetitions();
-
-    setLoading("Ansicht wird aufgebaut.", `${state.competitions.length} Wettkämpfe gefunden`, 100);
-    ui.statusDot.classList.remove("is-loading");
-    ui.statusText.textContent = `${state.competitions.length} Wettkämpfe · lokale SQLite-Daten`;
-
-    window.setTimeout(() => {
-      ui.loading.hidden = true;
-      ui.app.hidden = false;
-      route();
-    }, 220);
+    const response = await fetch(DATABASE_URL, { cache: "no-cache" });
+    if (!response.ok) throw new Error(`Datenbank: HTTP ${response.status}`);
+    const [SQL, bytes] = await Promise.all([
+      initSqlJs({ locateFile: () => "vendor/sql.js/sql-wasm.wasm" }),
+      readDatabase(response),
+    ]);
+    db = new SQL.Database(bytes);
+    const identity = query("SELECT canonical_drive_file_id FROM database_identity WHERE singleton_id = 1")[0];
+    if (identity?.canonical_drive_file_id !== DATABASE_ID) throw new Error("Unerwartete Datenbankdatei.");
+    loadArchive();
+    loading.hidden = true;
+    app.hidden = false;
+    route();
   } catch (error) {
     console.error(error);
-    showFatalError(error);
+    loading.hidden = true;
+    app.hidden = false;
+    const panel = element("section", "error-card");
+    const retry = element("button", "button", "Neu laden");
+    retry.addEventListener("click", () => location.reload());
+    panel.append(element("h1", "", "Datenbank konnte nicht geladen werden"), retry);
+    app.replaceChildren(panel);
   }
 }
 
-async function downloadDatabase() {
-  return downloadFrom(LOCAL_DATABASE_URL);
-}
-
-async function downloadFrom(url) {
-  const response = await fetch(url, { cache: "no-store" });
-  if (!response.ok) {
-    throw new Error(`Die lokale Datenbank antwortet mit HTTP ${response.status}.`);
-  }
-
-  state.databaseModified = response.headers.get("last-modified");
-  const total = Number(response.headers.get("content-length")) || 0;
-
-  if (!response.body) {
-    return new Uint8Array(await response.arrayBuffer());
-  }
-
+async function readDatabase(response) {
+  const size = Number(response.headers.get("content-length"));
+  if (!response.body || !size || response.headers.get("content-encoding")) return response.arrayBuffer();
+  const progress = document.querySelector("#loading-progress");
+  progress.max = size;
+  progress.value = 0;
   const reader = response.body.getReader();
-  const chunks = [];
-  let received = 0;
-  const message = "Lokale Ergebnisdatenbank wird geladen.";
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    chunks.push(value);
-    received += value.length;
-    const percent = total ? Math.min(90, 7 + (received / total) * 83) : 45;
-    setLoading(
-      message,
-      total ? `${formatBytes(received)} von ${formatBytes(total)}` : formatBytes(received),
-      percent,
-    );
-  }
-
-  const bytes = new Uint8Array(received);
+  const bytes = new Uint8Array(size);
   let offset = 0;
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset);
-    offset += chunk.length;
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    bytes.set(value, offset);
+    offset += value.length;
+    progress.value = offset;
   }
   return bytes;
 }
 
-function setLoading(message, meta, percent) {
-  ui.loadingMessage.textContent = message;
-  ui.loadingMeta.textContent = meta;
-  ui.progress.style.width = `${percent}%`;
-}
-
-function verifyDatabase() {
-  const identity = queryOne(
-    "SELECT canonical_drive_file_id, canonical_filename FROM database_identity WHERE singleton_id = 1",
-  );
-  if (!identity || identity.canonical_drive_file_id !== DATABASE_ID) {
-    throw new Error("Die geladene Datei ist nicht die erwartete Lifesaving-Datenbank.");
-  }
-}
-
-function loadCompetitions() {
-  return query(`
-    SELECT
-      c.id,
-      c.name,
-      c.edition_label,
-      c.start_date,
-      c.end_date,
-      c.environment,
-      v.name AS venue_name,
-      v.city,
-      co.name AS country_name,
-      cs.name AS series_name,
-      COUNT(DISTINCT ce.id) AS event_count,
-      COUNT(DISTINCT r.id) AS result_count
+function loadArchive() {
+  stats = query(`
+    SELECT (SELECT COUNT(*) FROM competitions) AS competitions,
+           (SELECT COUNT(*) FROM disciplines) AS disciplines,
+           (SELECT COUNT(*) FROM athletes) AS people,
+           (SELECT COUNT(*) FROM clubs) AS clubs,
+           (SELECT COUNT(*) FROM competition_events) AS events,
+           (SELECT COUNT(*) FROM results) AS results
+  `)[0];
+  competitions = query(`
+    SELECT c.id, c.name, c.edition_label, c.start_date, c.end_date, c.environment,
+           v.name AS venue, v.city, co.name AS country, cs.name AS series
     FROM competitions c
     LEFT JOIN venues v ON v.id = c.venue_id
     LEFT JOIN countries co ON co.id = v.country_id
     LEFT JOIN competition_series cs ON cs.id = c.series_id
-    LEFT JOIN competition_events ce ON ce.competition_id = c.id
-    LEFT JOIN rounds ro ON ro.event_id = ce.id
-    LEFT JOIN results r ON r.round_id = ro.id
-    GROUP BY c.id
-    ORDER BY COALESCE(c.start_date, c.edition_label, '') DESC, c.name COLLATE NOCASE
   `);
+  const disciplines = groupBy(query("SELECT discipline_id, alias FROM discipline_aliases"), "discipline_id");
+  eventsByCompetition = groupBy(query(`
+    WITH result_counts AS (
+      SELECT ro.event_id, COUNT(*) AS result_count
+      FROM rounds ro JOIN results r ON r.round_id = ro.id
+      GROUP BY ro.event_id
+    )
+    SELECT ce.id, ce.competition_id, ce.external_event_code, ce.event_name, ce.source_title_raw,
+           ce.gender, ce.discipline_id, d.canonical_name AS discipline,
+           cat.label AS category, COALESCE(rc.result_count, 0) AS result_count
+    FROM competition_events ce
+    JOIN disciplines d ON d.id = ce.discipline_id
+    LEFT JOIN categories cat ON cat.id = ce.category_id
+    LEFT JOIN result_counts rc ON rc.event_id = ce.id
+    ORDER BY CAST(ce.external_event_code AS INTEGER), ce.id
+  `).map((event) => ({
+    ...event,
+    gender: ({ Female: "Frauen", Male: "Männer", Mixed: "Mixed" })[event.gender] || event.gender,
+    terms: normalize([event.event_name, event.source_title_raw, event.discipline, event.category,
+      event.gender, ({ Female: "Frauen", Male: "Männer" })[event.gender],
+      ...(disciplines.get(event.discipline_id) || []).map(({ alias }) => alias)].join(" ")),
+  })), "competition_id");
+
+  for (const competition of competitions) {
+    const events = eventsByCompetition.get(competition.id) || [];
+    competition.year = [competition.start_date, competition.edition_label, competition.name]
+      .join(" ").match(/\b(?:19|20)\d{2}\b/)?.[0] || "";
+    competition.environment = environmentLabel(competition.environment);
+    competition.resultCount = events.reduce((total, event) => total + event.result_count, 0);
+    competition.eventCount = events.length;
+    competition.terms = normalize([competition.name, competition.edition_label, competition.year,
+      competition.city, competition.country, competition.venue, competition.series, competition.environment].join(" "));
+  }
+  competitionsById = new Map(competitions.map((competition) => [competition.id, competition]));
+}
+
+function environmentLabel(value = "") {
+  const key = (value || "").toLowerCase().replaceAll("_", " ").trim();
+  return ({
+    pool: "Pool", ocean: "Ocean", beach: "Beach", "open water": "Open Water",
+    mixed: "Gemischt", "mixed pool and ocean": "Pool / Ocean",
+    "beach/open water": "Beach / Open Water", "ocean/beach": "Ocean / Beach",
+  })[key] || value || "";
 }
 
 function route() {
-  if (!state.db) return;
-  const match = window.location.hash.match(/^#\/wettkampf\/(\d+)/);
-  if (match) {
-    renderCompetition(Number(match[1]));
-  } else {
-    renderOverview();
-  }
-  document.querySelector("#inhalt")?.focus({ preventScroll: true });
-  window.scrollTo({ top: 0, behavior: "auto" });
+  const [path, params] = location.hash.split("?");
+  const id = path.match(/^#\/wettkampf\/(\d+)\/?$/)?.[1];
+  app.replaceChildren(id ? renderCompetition(competitionsById.get(Number(id)), new URLSearchParams(params)) : renderOverview());
+  main.focus({ preventScroll: true });
+  window.scrollTo(0, 0);
 }
 
 function renderOverview() {
   document.title = "Lifesaving Ergebnisarchiv";
-  clear(ui.app);
-
-  const shell = element("div", "app-shell");
-  const hero = element("section", "hero");
-  const copy = element("div", "hero-copy");
-  copy.append(
-    element("p", "eyebrow", "Wettkampfdatenbank"),
-    element("h1", "", "Ergebnisse, die nicht untergehen."),
-    element("p", "", "Durchsuche alle erfassten Lifesaving-Wettkämpfe und öffne Disziplinen, Platzierungen, Zeiten und Punkte direkt aus der aktuellen Datenbank."),
-  );
-  const totalResults = state.competitions.reduce((sum, item) => sum + Number(item.result_count || 0), 0);
-  const stat = element("div", "hero-stat");
-  stat.append(element("strong", "", formatNumber(totalResults)), element("span", "", "strukturierte Resultate"));
-  hero.append(copy, stat);
-
-  const toolbar = element("div", "toolbar");
-  const searchField = element("div", "field");
-  const searchLabel = element("label", "", "Wettkämpfe durchsuchen");
-  searchLabel.htmlFor = "competition-search";
-  const search = element("input");
-  search.id = "competition-search";
-  search.type = "search";
-  search.placeholder = "Name, Jahr, Ort oder Land …";
-  search.autocomplete = "off";
-  searchField.append(searchLabel, search, element("span", "search-icon"));
-
-  const participantField = element("div", "field");
-  const participantLabel = element("label", "", "Person oder Club durchsuchen");
-  participantLabel.htmlFor = "participant-search";
-  const participantSearch = element("input");
-  participantSearch.id = "participant-search";
-  participantSearch.type = "search";
-  participantSearch.placeholder = "Person oder Club …";
-  participantSearch.autocomplete = "off";
-  participantField.append(participantLabel, participantSearch, element("span", "search-icon"));
-
-  const filterField = element("div", "field");
-  const filterLabel = element("label", "", "Umgebung filtern");
-  filterLabel.htmlFor = "environment-filter";
-  const filter = element("select");
-  filter.id = "environment-filter";
-  addOption(filter, "", "Alle Umgebungen");
-  const environments = [...new Set(state.competitions.map((item) => item.environment).filter(Boolean))].sort(localeSort);
-  for (const value of environments) addOption(filter, value, translateEnvironment(value));
-  filterField.append(filterLabel, filter);
-  toolbar.append(searchField, participantField, filterField);
-
-  const heading = element("div", "results-heading");
-  heading.append(element("h2", "", "Alle Wettkämpfe"), element("span", "results-count"));
+  const page = element("div");
+  const dashboard = element("section", "dashboard");
+  const metrics = element("dl", "metrics");
+  for (const [label, value] of [
+    ["Wettkämpfe", stats.competitions], ["Disziplinen", stats.disciplines],
+    ["Personen", stats.people], ["Clubs", stats.clubs],
+    ["Austragungen", stats.events], ["Ergebnisse", stats.results],
+  ]) {
+    const metric = element("div", "metric");
+    metric.append(element("dt", "", label), element("dd", "", number.format(value)));
+    metrics.append(metric);
+  }
+  dashboard.append(element("h1", "", "Ergebnisarchiv"), metrics);
+  const section = element("section");
+  const { heading, count } = sectionHeading("Wettkämpfe");
   const list = element("div", "competition-list");
-  const empty = element("div", "empty-state", "Keine Wettkämpfe passen zu dieser Suche.");
-  empty.hidden = true;
+  const empty = element("p", "empty-state", "Keine Wettkämpfe gefunden.");
+  const filters = createFilters("overview", overviewFilters, scopes, [
+    ["year", "Jahr", options(competitions, "year").reverse()],
+    ["country", "Land", options(competitions, "country")],
+    ["environment", "Umgebung", options(competitions, "environment")],
+    ["sort", "Sortierung", [["oldest", "Älteste zuerst"], ["name", "Name A–Z"]], "Neueste zuerst"],
+  ], update);
+  section.append(heading, filters, list, empty);
+  page.append(dashboard, section);
+  update();
+  return page;
 
-  const renderCards = () => {
-    const term = normalize(search.value);
-    const participantTerm = participantSearch.value;
-    const participantMatches = findCompetitionParticipantMatches(participantTerm);
-    const environment = filter.value;
-    const visible = state.competitions.filter((competition) => {
-      const haystack = normalize([
-        competition.name,
-        competition.edition_label,
-        competition.start_date,
-        competition.venue_name,
-        competition.city,
-        competition.country_name,
-        competition.series_name,
-      ].join(" "));
-      return (!term || haystack.includes(term))
-        && (!participantTerm.trim() || participantMatches.has(Number(competition.id)))
-        && (!environment || competition.environment === environment);
+  function update() {
+    const { q, scope, year, country, environment, sort } = overviewFilters;
+    const tokens = searchTokens(q);
+    const rows = [];
+    for (const competition of competitions) {
+      if (year && year !== competition.year) continue;
+      if (country && country !== (competition.country || "(unknown)")) continue;
+      if (environment && environment !== (competition.environment || "(unknown)")) continue;
+      let context = null;
+      if (tokens.length) {
+        const events = eventsByCompetition.get(competition.id) || [];
+        if (scope === "competition" || scope === "all") {
+          if (matches(competition.terms, tokens)) {
+            rows.push({ competition, context });
+            continue;
+          }
+          if (scope === "competition") continue;
+        }
+        if (scope === "discipline" || scope === "all") {
+          if (events.some((event) => matches(event.terms, tokens))) context = scope;
+        }
+        if (!context && scope !== "discipline") {
+          const people = searchParticipants(competition.id, scope, tokens);
+          if (people.size) context = scope;
+        }
+        if (!context) continue;
+      }
+      rows.push({ competition, context });
+    }
+    rows.sort(({ competition: a }, { competition: b }) => {
+      const nameOrder = collator.compare(a.name, b.name);
+      if (sort === "name") return nameOrder;
+      const dateOrder = (a.start_date || a.year).localeCompare(b.start_date || b.year);
+      return (sort === "oldest" ? dateOrder : -dateOrder) || nameOrder;
     });
-
-    clear(list);
-    for (const competition of visible) {
-      list.append(createCompetitionCard(
-        competition,
-        participantMatches.get(Number(competition.id)) || 0,
-        Boolean(participantTerm.trim()),
-      ));
-    }
-    heading.querySelector(".results-count").textContent = `${visible.length} von ${state.competitions.length}`;
-    empty.hidden = visible.length !== 0;
-  };
-
-  search.addEventListener("input", renderCards);
-  participantSearch.addEventListener("input", debounce(renderCards));
-  filter.addEventListener("change", renderCards);
-  renderCards();
-
-  shell.append(hero, toolbar, heading, list, empty);
-  ui.app.append(shell);
+    list.replaceChildren(...rows.map(({ competition, context }) => competitionLink(competition, context, q)));
+    count.textContent = `${number.format(rows.length)} / ${number.format(competitions.length)}`;
+    empty.hidden = rows.length > 0;
+  }
 }
 
-function createCompetitionCard(competition, participantMatchCount = 0, showParticipantMatches = false) {
-  const card = element("article", "competition-card");
-  const kicker = element("div", "card-kicker");
-  kicker.append(element("span", "", competition.edition_label || yearFromDate(competition.start_date) || "Wettkampf"));
-
-  const title = element("h3");
-  const link = element("a", "", competition.name);
-  link.href = `#/wettkampf/${competition.id}`;
-  title.append(link);
-
-  const meta = element("div", "card-meta");
-  meta.append(
-    element("span", "", formatDateRange(competition.start_date, competition.end_date)),
-    element("span", "", formatLocation(competition)),
-  );
-
-  const stats = element("div", "card-stats");
-  stats.append(
-    element("span", "chip is-ocean", `${formatNumber(competition.event_count)} Disziplinen`),
-    element("span", "chip is-accent", `${formatNumber(competition.result_count)} Resultate`),
-  );
-  if (showParticipantMatches) {
-    stats.append(element("span", "chip is-match", `${formatNumber(participantMatchCount)} passende Einträge`));
-  }
-  card.append(kicker, title, meta, stats);
-  return card;
+function competitionLink(competition, scope, q) {
+  const link = element("a", "competition-row");
+  const params = scope ? "?" + new URLSearchParams({ q, scope }).toString() : "";
+  link.href = `#/wettkampf/${competition.id}${params}`;
+  const name = element("span");
+  name.append(element("strong", "", competition.name));
+  const place = [dateLabel(competition), ...new Set([competition.city, competition.country].filter(Boolean)), competition.environment].filter(Boolean).join(" · ");
+  if (place) name.append(element("small", "", place));
+  link.append(name, element("span", "row-meta",
+    `${number.format(competition.eventCount)} Austragungen · ${number.format(competition.resultCount)} Ergebnisse`),
+  decorative("span", "chevron", "›"));
+  return link;
 }
 
-function renderCompetition(id) {
-  const competition = queryOne(`
-    SELECT
-      c.*,
-      v.name AS venue_name,
-      v.city,
-      co.name AS country_name,
-      cs.name AS series_name,
-      src.source_file_id,
-      src.original_filename,
-      src.current_filename,
-      src.last_processed_at,
-      COUNT(DISTINCT ce.id) AS event_count,
-      COUNT(DISTINCT r.id) AS result_count
-    FROM competitions c
-    LEFT JOIN venues v ON v.id = c.venue_id
-    LEFT JOIN countries co ON co.id = v.country_id
-    LEFT JOIN competition_series cs ON cs.id = c.series_id
-    LEFT JOIN import_sources src ON src.id = c.source_id
-    LEFT JOIN competition_events ce ON ce.competition_id = c.id
-    LEFT JOIN rounds ro ON ro.event_id = ce.id
-    LEFT JOIN results r ON r.round_id = ro.id
-    WHERE c.id = ?
-    GROUP BY c.id
-  `, [id]);
-
-  if (!competition) {
-    renderNotFound();
-    return;
-  }
-
-  document.title = `${competition.name} · Lifesaving Ergebnisarchiv`;
-  clear(ui.app);
-  const shell = element("div", "app-shell");
-  const back = element("a", "back-link", "Alle Wettkämpfe");
+function renderCompetition(competition, params) {
+  const page = element("div");
+  const back = element("a", "back-link", "← Wettkämpfe");
   back.href = "#/";
+  page.append(back);
+  if (!competition) {
+    document.title = "Wettkampf nicht gefunden";
+    page.append(element("h1", "", document.title));
+    return page;
+  }
 
-  const hero = element("section", "detail-hero");
-  hero.append(element("p", "eyebrow", competition.series_name || "Lifesaving-Wettkampf"), element("h1", "", competition.name));
-  const subline = element("div", "detail-subline");
-  subline.append(
-    element("span", "", formatDateRange(competition.start_date, competition.end_date)),
-    element("span", "", formatLocation(competition)),
-    element("span", "", translateEnvironment(competition.environment)),
-  );
-  const stats = element("div", "detail-stats");
-  stats.append(
-    element("span", "chip", `${formatNumber(competition.event_count)} Disziplinen`),
-    element("span", "chip", `${formatNumber(competition.result_count)} Resultate`),
-  );
-  hero.append(subline, stats);
+  document.title = `${competition.name} · Lifesaving`;
+  const header = element("header", "detail-header");
+  const meta = [dateLabel(competition), ...new Set([competition.venue, competition.city, competition.country].filter(Boolean)), competition.environment].filter(Boolean);
+  header.append(element("h1", "", competition.name));
+  if (meta.length) header.append(element("p", "muted", meta.join(" · ")));
+  const results = createEventsPanel(competition.id, params);
+  const panels = [["Ergebnisse", results]];
+  const standings = query(`
+    SELECT standing_group, entity_name, rank_numeric, rank_text, points, events_count
+    FROM overall_standings WHERE competition_id = ?
+    ORDER BY standing_group COLLATE NOCASE, rank_numeric IS NULL, rank_numeric, entity_name
+  `, [competition.id]);
+  if (standings.length) {
+    const panel = element("section");
+    panel.append(element("h2", "sr-only", "Gesamtwertungen"));
+    for (const [label, rows] of groupBy(standings, "standing_group")) {
+      const group = element("div", "standing-group");
+      if (label) group.append(element("h3", "", label));
+      group.append(simpleTable(["Rang", "Name / Team", "Wertungen", "Punkte"], rows.map((row) => [
+        rankLabel(row), row.entity_name, row.events_count, row.points == null ? null : decimal.format(row.points),
+      ])));
+      panel.append(group);
+    }
+    panels.push(["Gesamtwertungen", panel]);
+  }
+  const medals = query(`
+    SELECT club_name, rank_numeric, rank_text, gold, silver, bronze FROM medal_table
+    WHERE competition_id = ? ORDER BY rank_numeric IS NULL, rank_numeric, club_name
+  `, [competition.id]);
+  if (medals.length) {
+    const panel = element("section");
+    panel.append(element("h2", "sr-only", "Medaillenspiegel"), simpleTable(
+      ["Rang", "Club", "Gold", "Silber", "Bronze"],
+      medals.map((row) => [rankLabel(row), row.club_name, row.gold, row.silver, row.bronze]),
+    ));
+    panels.push(["Medaillen", panel]);
+  }
 
-  const grid = element("div", "detail-grid");
-  const content = element("div", "content-stack");
-  content.append(createEventsPanel(competition.id));
-
-  const standings = loadStandings(competition.id);
-  if (standings.length) content.append(createStandingsPanel(standings));
-  const medals = loadMedals(competition.id);
-  if (medals.length) content.append(createMedalPanel(medals));
-
-  const sidebar = createFactsPanel(competition);
-  grid.append(content, sidebar);
-  shell.append(back, hero, grid);
-  ui.app.append(shell);
+  page.append(header);
+  if (panels.length > 1) {
+    const nav = element("nav", "detail-nav");
+    nav.setAttribute("aria-label", "Wettkampfbereiche");
+    const buttons = panels.map(([label, panel], index) => {
+      panel.id = `wettkampf-bereich-${index}`;
+      const button = element("button", "", label);
+      button.setAttribute("aria-controls", panel.id);
+      button.addEventListener("click", () => activate(index));
+      nav.append(button);
+      return button;
+    });
+    function activate(index) {
+      panels.forEach(([, panel], i) => {
+        panel.hidden = i !== index;
+        buttons[i].setAttribute("aria-pressed", String(i === index));
+      });
+    }
+    activate(0);
+    page.append(nav);
+  }
+  page.append(...panels.map(([, panel]) => panel));
+  return page;
 }
 
-function createEventsPanel(competitionId) {
-  const events = query(`
-    SELECT
-      ce.id,
-      ce.external_event_code,
-      ce.event_name,
-      ce.source_title_raw,
-      ce.gender,
-      ce.event_kind,
-      d.canonical_name AS discipline_name,
-      cat.label AS category_label,
-      COUNT(DISTINCT r.id) AS result_count
-    FROM competition_events ce
-    LEFT JOIN disciplines d ON d.id = ce.discipline_id
-    LEFT JOIN categories cat ON cat.id = ce.category_id
-    LEFT JOIN rounds ro ON ro.event_id = ce.id
-    LEFT JOIN results r ON r.round_id = ro.id
-    WHERE ce.competition_id = ?
-    GROUP BY ce.id
-    ORDER BY CAST(ce.external_event_code AS INTEGER), ce.id
-  `, [competitionId]);
-
-  const panel = element("section", "panel");
-  panel.append(
-    element("h2", "", "Disziplinen & Ergebnisse"),
-    element("p", "panel-intro", "Eine Disziplin öffnen, um alle erfassten Platzierungen, Zeiten und Punkte zu sehen."),
-  );
-
-  const tools = element("div", "event-tools");
-  const eventField = element("div", "field");
-  const label = element("label", "", "Disziplinen durchsuchen");
-  label.htmlFor = "event-search";
-  const input = element("input");
-  input.id = "event-search";
-  input.type = "search";
-  input.placeholder = "Disziplin, Kategorie oder Geschlecht …";
-  input.autocomplete = "off";
-  eventField.append(label, input, element("span", "search-icon"));
-
-  const participantField = element("div", "field");
-  const participantLabel = element("label", "", "Person oder Club in diesem Wettkampf durchsuchen");
-  participantLabel.htmlFor = "event-participant-search";
-  const participantInput = element("input");
-  participantInput.id = "event-participant-search";
-  participantInput.type = "search";
-  participantInput.placeholder = "Person oder Club …";
-  participantInput.autocomplete = "off";
-  participantField.append(participantLabel, participantInput, element("span", "search-icon"));
-  tools.append(eventField, participantField);
-
+function createEventsPanel(competitionId, params) {
+  const events = eventsByCompetition.get(competitionId) || [];
+  const eventScopes = scopes.filter(([value]) => value !== "competition");
+  const requestedScope = params.get("scope");
+  const filters = {
+    q: params.get("q") || "",
+    scope: eventScopes.some(([value]) => value === requestedScope) ? requestedScope : "all",
+    category: "",
+    gender: "",
+  };
+  const panel = element("section");
+  const { heading, count } = sectionHeading("Disziplinen");
   const list = element("div", "event-list");
-  const empty = element("div", "empty-state", "Keine passende Disziplin gefunden.");
-  empty.hidden = true;
+  const empty = element("p", "empty-state", "Keine Disziplinen gefunden.");
+  const cards = new Map();
+  panel.append(heading, createFilters("event", filters, eventScopes, [
+    ["category", "Kategorie", options(events, "category")],
+    ["gender", "Geschlecht", options(events, "gender")],
+  ], update), list, empty);
+  update();
+  return panel;
 
-  const cards = events.map((event) => ({
-    event,
-    ...createEventCard(event, () => participantInput.value),
-  }));
-  for (const item of cards) list.append(item.card);
-
-  const filterCards = (refreshOpenResults = false) => {
-    const term = normalize(input.value);
-    const participantTerm = participantInput.value;
-    const participantMatches = findEventParticipantMatches(competitionId, participantTerm);
-    let visible = 0;
-    for (const { event, card, body, matchChip } of cards) {
-      const matchesEvent = !term || normalize([event.event_name, event.source_title_raw, event.discipline_name, event.category_label, event.gender].join(" ")).includes(term);
-      const matchCount = participantMatches.get(Number(event.id)) || 0;
-      const matchesParticipant = !participantTerm.trim() || matchCount > 0;
-      const matches = matchesEvent && matchesParticipant;
-      card.hidden = !matches;
-      matchChip.hidden = !participantTerm.trim();
-      matchChip.textContent = `${formatNumber(matchCount)} Treffer`;
-      if (refreshOpenResults && card.open) renderEventResults(event.id, body, participantTerm);
-      if (matches) visible += 1;
+  function update() {
+    const tokens = searchTokens(filters.q);
+    const participants = tokens.length && filters.scope !== "discipline"
+      ? searchParticipants(competitionId, filters.scope, tokens) : new Map();
+    const visible = [];
+    for (const event of events) {
+      if (filters.category && filters.category !== (event.category || "(unknown)")) continue;
+      if (filters.gender && filters.gender !== (event.gender || "(unknown)")) continue;
+      const disciplineMatch = tokens.length && ["all", "discipline"].includes(filters.scope) &&
+        matches(event.terms, tokens);
+      const entries = participants.get(event.id);
+      if (tokens.length && !disciplineMatch && !entries) continue;
+      if (!cards.has(event.id)) cards.set(event.id, createEventCard(event));
+      const card = cards.get(event.id);
+      card.setMatches(disciplineMatch ? null : entries);
+      visible.push(card.node);
     }
-    empty.hidden = visible !== 0;
+    list.replaceChildren(...visible);
+    count.textContent = `${number.format(visible.length)} / ${number.format(events.length)}`;
+    empty.hidden = visible.length > 0;
+    list.classList.toggle("is-empty", !visible.length);
+  }
+}
+
+function createEventCard(event) {
+  const node = element("details", "event-card");
+  const summary = element("summary");
+  const title = element("span", "event-name");
+  title.append(element("strong", "", event.source_title_raw || event.event_name));
+  const meta = [event.category, event.gender].filter(Boolean).join(" · ");
+  if (meta) title.append(element("small", "", meta));
+  const count = element("span", "count");
+  summary.append(title, count);
+  const body = element("div", "event-body");
+  node.append(summary, body);
+  let results;
+  let entryIds = null;
+  let renderedIds;
+  node.addEventListener("toggle", render);
+  return {
+    node,
+    setMatches(ids) {
+      entryIds = ids || null;
+      count.textContent = entryIds ? `${number.format(entryIds.size)} Treffer` : `${number.format(event.result_count)} Erg.`;
+      render();
+    },
   };
 
-  input.addEventListener("input", () => filterCards(false));
-  participantInput.addEventListener("input", debounce(() => filterCards(true)));
-
-  panel.append(tools, list, empty);
-  return panel;
+  function render() {
+    if (!node.open || renderedIds === entryIds) return;
+    results ??= loadResults(event.id);
+    const visible = entryIds ? results.filter((row) => entryIds.has(row.entry_id)) : results;
+    body.replaceChildren(visible.length ? resultTable(visible) : element("p", "empty-state", "Keine Ergebnisse."));
+    renderedIds = entryIds;
+  }
 }
 
-function createEventCard(event, getParticipantTerm) {
-  const details = element("details", "event-card");
-  const summary = element("summary");
-  const name = element("span", "event-name");
-  name.append(
-    element("strong", "", event.source_title_raw || event.event_name),
-    element("small", "", [event.discipline_name, translateGender(event.gender), event.category_label].filter(Boolean).join(" · ")),
-  );
-  const stats = element("span", "event-summary-stats");
-  stats.append(element("span", "chip is-ocean", `${formatNumber(event.result_count)} Resultate`));
-  const matchChip = element("span", "chip is-match", "");
-  matchChip.hidden = true;
-  stats.append(matchChip);
-  summary.append(name, stats);
-  const body = element("div", "event-body");
-  body.append(element("div", "event-loading", "Ergebnisse werden beim Öffnen geladen."));
-  details.append(summary, body);
-
-  details.addEventListener("toggle", () => {
-    if (details.open && !details.dataset.loaded) {
-      details.dataset.loaded = "true";
-      renderEventResults(event.id, body, getParticipantTerm());
-    }
-  });
-  return { card: details, body, matchChip };
-}
-
-function renderEventResults(eventId, container, participantTerm = "") {
-  const normalizedTerm = normalize(participantTerm);
-  const results = query(`
-    SELECT
-      r.rank_numeric,
-      r.rank_text,
-      r.is_tied,
-      r.lane,
-      r.time_text,
-      r.raw_value_text,
-      r.points,
-      r.status_code,
-      r.qualification_code,
-      r.record_marker,
-      r.disqualification_code,
-      r.remarks,
-      e.display_name,
-      e.participant_type,
-      cl.name AS club_name,
-      ro.source_label AS round_label,
-      ro.sequence_no,
-      ro.heat_no
-    FROM entries e
-    JOIN rounds ro ON ro.event_id = e.event_id
-    JOIN results r ON r.entry_id = e.id AND r.round_id = ro.id
-    LEFT JOIN clubs cl ON cl.id = e.club_id
-    WHERE e.event_id = ?
+function loadResults(eventId) {
+  return query(`
+    SELECT r.entry_id, r.rank_numeric, r.rank_text, r.lane, r.time_text, r.raw_value_text,
+           r.points, r.status_code, r.disqualification_code, r.qualification_code, r.record_marker,
+           r.remarks, e.display_name, COALESCE(ec.name, tc.name) AS club_name,
+           ro.source_label AS round_label, ro.heat_no, e.team_id
+    FROM rounds ro
+    JOIN results r ON r.round_id = ro.id
+    JOIN entries e ON e.id = r.entry_id AND e.event_id = ro.event_id
+    LEFT JOIN clubs ec ON ec.id = e.club_id
+    LEFT JOIN teams t ON t.id = e.team_id
+    LEFT JOIN clubs tc ON tc.id = t.club_id
+    WHERE ro.event_id = ?
     ORDER BY COALESCE(ro.sequence_no, 9999), COALESCE(ro.heat_no, 9999),
-             CASE WHEN r.rank_numeric IS NULL THEN 1 ELSE 0 END, r.rank_numeric, e.display_name COLLATE NOCASE
-  `, [eventId]).filter((result) => !normalizedTerm || normalize(`${result.display_name || ""} ${result.club_name || ""}`).includes(normalizedTerm));
+             r.rank_numeric IS NULL, r.rank_numeric, e.display_name COLLATE NOCASE
+  `, [eventId]);
+}
 
-  clear(container);
-  if (!results.length) {
-    container.append(element(
-      "div",
-      "empty-state",
-      participantTerm.trim()
-        ? "Keine Resultate passen zu dieser Personen- oder Clubsuche."
-        : "Für diese Disziplin sind noch keine Einzelresultate gespeichert.",
-    ));
-    return;
-  }
-
-  const wrap = element("div", "table-wrap");
-  const table = element("table");
-  const head = element("thead");
-  const headerRow = element("tr");
-  for (const title of ["Rang", "Teilnehmer / Team", "Runde", "Bahn", "Leistung", "Punkte", "Status"]) {
-    headerRow.append(element("th", "", title));
-  }
-  head.append(headerRow);
-  const body = element("tbody");
-
-  for (const result of results) {
+function resultTable(rows) {
+  const { wrap, body } = createTable([
+    ["Rang", "rank"], ["Name / Team", ""], ["Runde", "desktop-round"], ["Leistung", "performance"],
+  ]);
+  const members = getMemberNames();
+  for (const result of rows) {
     const row = element("tr");
-    row.append(element("td", "rank", result.rank_text || result.rank_numeric || "–"));
-    const participant = element("td", "participant");
-    participant.append(element("strong", "", result.display_name || "–"));
-    if (result.club_name) participant.append(element("small", "", result.club_name));
-    row.append(participant);
-    row.append(
-      element("td", "", formatRound(result)),
-      element("td", "nowrap", result.lane ?? "–"),
-      element("td", "nowrap", formatPerformance(result)),
-      element("td", "nowrap", result.points == null ? "–" : formatDecimal(result.points)),
-    );
-    const status = element("td", "status-code", formatStatus(result));
-    if (result.remarks) status.title = result.remarks;
-    row.append(status);
+    const person = element("td");
+    person.append(element("strong", "", result.display_name));
+    if (result.club_name && result.club_name !== result.display_name) person.append(element("small", "", result.club_name));
+    const names = getMemberLabels(members, result.entry_id, result.team_id);
+    if (names.length) person.append(element("small", "", names.join(", ")));
+    const roundText = [result.round_label, result.heat_no == null ? "" : `Lauf ${result.heat_no}`,
+      result.lane == null ? "" : `Bahn ${result.lane}`].filter(Boolean).join(" · ");
+    if (roundText) person.append(element("small", "mobile-round", roundText));
+    const performance = result.time_text || (result.raw_value_text !== String(result.points ?? "") ? result.raw_value_text : "");
+    const points = result.points == null ? "" : `${decimal.format(result.points)} Pkt.`;
+    const score = element("td", "performance");
+    score.append(element("strong", "", performance || points || "–"));
+    if (performance && points) score.append(element("small", "", points));
+    const status = [result.status_code === "FINISHED" ? "" : result.status_code,
+      result.disqualification_code ? `DSQ ${result.disqualification_code}` : "",
+      result.qualification_code, result.record_marker, result.remarks].filter(Boolean).join(" · ");
+    if (status) score.append(element("small", "", status));
+    row.append(element("td", "rank", rankLabel(result)), person,
+      element("td", "desktop-round muted", roundText || "–"), score);
     body.append(row);
   }
-
-  table.append(head, body);
-  wrap.append(table);
-  container.append(wrap);
-}
-
-function createFactsPanel(competition) {
-  const panel = element("aside", "panel side-panel");
-  panel.append(element("h2", "", "Wettkampfinfo"));
-  const facts = element("dl", "facts");
-  const entries = [
-    ["Zeitraum", formatDateRange(competition.start_date, competition.end_date)],
-    ["Austragungsort", formatLocation(competition)],
-    ["Umgebung", translateEnvironment(competition.environment)],
-    ["Serie", competition.series_name],
-    ["Importiert", formatDateTime(competition.last_processed_at)],
-  ];
-  for (const [label, value] of entries) {
-    if (!value || value === "Nicht angegeben") continue;
-    const item = element("div");
-    item.append(element("dt", "", label), element("dd", "", value));
-    facts.append(item);
-  }
-  panel.append(facts);
-
-  return panel;
-}
-
-function loadStandings(competitionId) {
-  return query(`
-    SELECT standing_group, entity_name, rank_numeric, rank_text, points, events_count
-    FROM overall_standings
-    WHERE competition_id = ?
-    ORDER BY standing_group COLLATE NOCASE, CASE WHEN rank_numeric IS NULL THEN 1 ELSE 0 END, rank_numeric, entity_name COLLATE NOCASE
-  `, [competitionId]);
-}
-
-function createStandingsPanel(standings) {
-  const panel = element("section", "panel");
-  panel.append(element("h2", "", "Gesamtwertungen"));
-  const groups = groupBy(standings, (item) => item.standing_group || "Gesamtwertung");
-  for (const [name, rows] of groups) {
-    const group = element("div", "standing-group");
-    group.append(element("h3", "", name), createSimpleTable(
-      ["Rang", "Name / Team", "Wertungen", "Punkte"],
-      rows.map((row) => [row.rank_text || row.rank_numeric || "–", row.entity_name, row.events_count ?? "–", row.points == null ? "–" : formatDecimal(row.points)]),
-    ));
-    panel.append(group);
-  }
-  return panel;
-}
-
-function loadMedals(competitionId) {
-  return query(`
-    SELECT club_name, rank_numeric, rank_text, gold, silver, bronze
-    FROM medal_table
-    WHERE competition_id = ?
-    ORDER BY CASE WHEN rank_numeric IS NULL THEN 1 ELSE 0 END, rank_numeric, club_name COLLATE NOCASE
-  `, [competitionId]);
-}
-
-function createMedalPanel(medals) {
-  const panel = element("section", "panel");
-  panel.append(
-    element("h2", "", "Medaillenspiegel"),
-    createSimpleTable(
-      ["Rang", "Verein", "Gold", "Silber", "Bronze"],
-      medals.map((row) => [row.rank_text || row.rank_numeric || "–", row.club_name, row.gold ?? "–", row.silver ?? "–", row.bronze ?? "–"]),
-    ),
-  );
-  return panel;
-}
-
-function createSimpleTable(headers, rows) {
-  const wrap = element("div", "table-wrap");
-  const table = element("table");
-  const thead = element("thead");
-  const headRow = element("tr");
-  headers.forEach((header) => headRow.append(element("th", "", header)));
-  thead.append(headRow);
-  const tbody = element("tbody");
-  for (const values of rows) {
-    const row = element("tr");
-    values.forEach((value, index) => row.append(element("td", index === 0 ? "rank" : "", value)));
-    tbody.append(row);
-  }
-  table.append(thead, tbody);
-  wrap.append(table);
   return wrap;
 }
 
-function renderNotFound() {
-  clear(ui.app);
-  const shell = element("div", "app-shell");
-  const empty = element("div", "empty-state");
-  empty.append(element("h1", "", "Wettkampf nicht gefunden"), element("p", "", "Der angeforderte Datensatz existiert nicht."));
-  const back = element("a", "back-link", "Zur Übersicht");
-  back.href = "#/";
-  empty.append(back);
-  shell.append(empty);
-  ui.app.append(shell);
+function getMemberNames() {
+  if (memberNames) return memberNames;
+  const tables = new Set(query("SELECT name FROM sqlite_master WHERE type = 'table'").map(({ name }) => name));
+  const members = (table, key) => tables.has(table) ? groupBy(query(`
+    SELECT m.${key} AS owner, a.display_name FROM ${table} m
+    JOIN athletes a ON a.id = m.athlete_id
+    ORDER BY m.member_order, m.id
+  `), "owner") : new Map();
+  memberNames = { entries: members("entry_members", "entry_id"), teams: members("team_members", "team_id") };
+  return memberNames;
 }
 
-function showFatalError(error) {
-  ui.loading.hidden = true;
-  ui.app.hidden = false;
-  ui.statusDot.classList.remove("is-loading");
-  ui.statusDot.classList.add("is-error");
-  ui.statusText.textContent = "Lokale Datenbank nicht erreichbar";
-  clear(ui.app);
+function getMemberLabels(members, entryId, teamId) {
+  const rows = members.entries.get(entryId) || members.teams.get(teamId) || [];
+  return [...new Set(rows.map(({ display_name }) => display_name))];
+}
 
-  const card = element("section", "error-card");
-  card.append(
-    element("p", "eyebrow", "Ladefehler"),
-    element("h1", "", "Die Ergebnisdaten konnten nicht geladen werden."),
-    element("p", "", "Bitte lade die Seite neu. Die lokale SQLite-Datei konnte nicht geöffnet werden."),
-    element("code", "", error?.message || String(error)),
-  );
-  const retry = element("button", "retry-button", "Erneut versuchen");
-  retry.type = "button";
-  retry.addEventListener("click", () => window.location.reload());
-  card.append(retry);
-  ui.app.append(card);
+function searchParticipants(competitionId, scope, tokens) {
+  if (!participantIndex) {
+    const members = getMemberNames();
+    const rows = query(`
+      SELECT ce.competition_id, e.id, e.event_id, e.display_name, e.participant_type, e.team_id,
+             a.display_name AS athlete, ec.name AS club, tc.name AS team_club
+      FROM competition_events ce
+      JOIN entries e ON e.event_id = ce.id
+      LEFT JOIN athletes a ON a.id = e.athlete_id
+      LEFT JOIN clubs ec ON ec.id = e.club_id
+      LEFT JOIN teams t ON t.id = e.team_id
+      LEFT JOIN clubs tc ON tc.id = t.club_id
+      WHERE EXISTS (
+        SELECT 1 FROM results r JOIN rounds ro ON ro.id = r.round_id
+        WHERE r.entry_id = e.id AND ro.event_id = ce.id
+      )
+    `).map((entry) => ({
+      competition: entry.competition_id,
+      id: entry.id,
+      event: entry.event_id,
+      people: [entry.athlete, ...getMemberLabels(members, entry.id, entry.team_id),
+        entry.participant_type !== "team" ? entry.display_name : ""].filter(Boolean).map(normalize),
+      clubs: [entry.club, entry.team_club,
+        entry.participant_type === "team" ? entry.display_name : ""].filter(Boolean).map(normalize),
+    }));
+    participantIndex = groupBy(rows, "competition");
+  }
+  const events = new Map();
+  for (const entry of participantIndex.get(competitionId) || []) {
+    const hasMatch = (name) => matches(name, tokens);
+    const found = (scope !== "club" && entry.people.some(hasMatch)) ||
+      (scope !== "person" && entry.clubs.some(hasMatch));
+    if (!found) continue;
+    if (!events.has(entry.event)) events.set(entry.event, new Set());
+    events.get(entry.event).add(entry.id);
+  }
+  return events;
+}
+
+function createFilters(id, values, searchScopes, fields, update) {
+  const form = element("form", id === "event" ? "filters detail-filters" : "filters");
+  form.setAttribute("role", "search");
+  form.setAttribute("aria-label", id === "event" ? "Wettkampf durchsuchen" : "Archiv durchsuchen");
+  form.addEventListener("submit", (event) => event.preventDefault());
+  const search = element("div", "search-controls");
+  const input = element("input");
+  input.type = "search";
+  input.value = values.q;
+  input.autocomplete = "off";
+  input.placeholder = "Suchbegriff eingeben";
+  search.append(field(`${id}-q`, "Suche", input));
+  const controls = element("div", "filter-options");
+  const selects = new Map();
+  for (const [key, label, choices, first] of [["scope", "Suchfeld", searchScopes], ...fields]) {
+    const select = element("select");
+    for (const [value, name] of key === "scope" ? choices : [["", first || "Alle"], ...choices]) {
+      const option = element("option", "", name);
+      option.value = value;
+      select.append(option);
+    }
+    select.value = values[key];
+    selects.set(key, select);
+    (key === "scope" ? search : controls).append(field(`${id}-${key}`, label, select));
+    select.addEventListener("change", () => {
+      values[key] = select.value;
+      apply();
+    });
+  }
+  const reset = element("button", "button", "Zurücksetzen");
+  reset.type = "button";
+  controls.append(reset);
+  form.append(search, controls);
+  let timer;
+  function syncReset() {
+    const active = values.q || values.scope !== "all" || fields.some(([key]) => values[key]);
+    reset.setAttribute("aria-disabled", String(!active));
+  }
+  function apply() {
+    clearTimeout(timer);
+    if (!form.isConnected) return;
+    values.q = input.value.trim();
+    syncReset();
+    update();
+  }
+  input.addEventListener("input", () => {
+    clearTimeout(timer);
+    timer = setTimeout(apply, 120);
+  });
+  reset.addEventListener("click", () => {
+    if (reset.getAttribute("aria-disabled") === "true") return;
+    input.value = "";
+    for (const [key, select] of selects) {
+      select.value = key === "scope" ? "all" : "";
+      values[key] = select.value;
+    }
+    apply();
+    input.focus();
+  });
+  syncReset();
+  return form;
+}
+
+function field(id, text, input) {
+  const wrap = element("div", "field");
+  const label = element("label", "field-label", text);
+  label.htmlFor = id;
+  input.id = id;
+  wrap.append(label, input);
+  return wrap;
+}
+
+function options(rows, key) {
+  const values = [...new Set(rows.map((row) => row[key]).filter(Boolean))].sort(collator.compare);
+  const choices = values.map((value) => [value, value]);
+  if (key !== "year" && rows.some((row) => !row[key])) choices.push(["(unknown)", "Ohne Angabe"]);
+  return choices;
+}
+
+function sectionHeading(title) {
+  const heading = element("div", "section-heading");
+  const count = element("span", "count");
+  count.setAttribute("role", "status");
+  heading.append(element("h2", "", title), count);
+  return { heading, count };
+}
+
+function createTable(headers) {
+  const wrap = element("div", "table-wrap");
+  const table = element("table");
+  const head = table.createTHead().insertRow();
+  for (const [title, className] of headers) {
+    const cell = element("th", className, title);
+    cell.scope = "col";
+    head.append(cell);
+  }
+  const body = table.createTBody();
+  wrap.append(table);
+  return { wrap, body };
+}
+
+function simpleTable(headers, rows) {
+  const { wrap, body } = createTable(headers.map((title, index) => [title, index ? "" : "rank"]));
+  for (const values of rows) {
+    const row = body.insertRow();
+    values.forEach((value, index) => row.append(element("td", index ? "" : "rank", value ?? "–")));
+  }
+  return wrap;
+}
+
+function rankLabel(row) {
+  return row.rank_text || row.rank_numeric || "–";
+}
+
+function dateLabel(competition) {
+  const format = (value) => value?.replace(/^(\d{4})-(\d{2})-(\d{2})$/, "$3.$2.$1");
+  const start = format(competition.start_date);
+  const end = format(competition.end_date);
+  if (start && end && start !== end) return `${start}–${end}`;
+  return start || end || competition.year;
+}
+
+function normalize(text) {
+  return String(text ?? "").normalize("NFD").replace(/\p{M}/gu, "")
+    .toLowerCase().replaceAll("ß", "ss");
+}
+
+function searchTokens(text) {
+  return normalize(text).trim().split(/\s+/).filter(Boolean);
+}
+
+function matches(text, tokens) {
+  return tokens.every((token) => text.includes(token));
+}
+
+function groupBy(rows, key) {
+  const groups = new Map();
+  for (const row of rows) {
+    const value = row[key];
+    if (!groups.has(value)) groups.set(value, []);
+    groups.get(value).push(row);
+  }
+  return groups;
 }
 
 function query(sql, params = []) {
-  const statement = state.db.prepare(sql);
+  const statement = db.prepare(sql);
   const rows = [];
   try {
     statement.bind(params);
@@ -664,181 +647,15 @@ function query(sql, params = []) {
   return rows;
 }
 
-function queryOne(sql, params = []) {
-  return query(sql, params)[0] || null;
-}
-
-function loadParticipantIndex() {
-  if (state.participantIndex) return state.participantIndex;
-  state.participantIndex = query(`
-    SELECT DISTINCT
-      ce.competition_id,
-      e.event_id,
-      e.id AS entry_id,
-      e.display_name,
-      cl.name AS club_name
-    FROM entries e
-    JOIN competition_events ce ON ce.id = e.event_id
-    JOIN results r ON r.entry_id = e.id
-    LEFT JOIN clubs cl ON cl.id = e.club_id
-  `).map((entry) => ({
-    ...entry,
-    searchText: normalize(`${entry.display_name || ""} ${entry.club_name || ""}`),
-  }));
-  return state.participantIndex;
-}
-
-function findCompetitionParticipantMatches(term) {
-  const needle = normalize(term);
-  const matches = new Map();
-  if (!needle) return matches;
-
-  for (const entry of loadParticipantIndex()) {
-    if (!entry.searchText.includes(needle)) continue;
-    const competitionId = Number(entry.competition_id);
-    matches.set(competitionId, (matches.get(competitionId) || 0) + 1);
-  }
-  return matches;
-}
-
-function findEventParticipantMatches(competitionId, term) {
-  const needle = normalize(term);
-  const matches = new Map();
-  if (!needle) return matches;
-
-  for (const entry of loadParticipantIndex()) {
-    if (Number(entry.competition_id) !== Number(competitionId) || !entry.searchText.includes(needle)) continue;
-    const eventId = Number(entry.event_id);
-    matches.set(eventId, (matches.get(eventId) || 0) + 1);
-  }
-  return matches;
-}
-
 function element(tag, className = "", text) {
   const node = document.createElement(tag);
   if (className) node.className = className;
-  if (text !== undefined && text !== null) node.textContent = String(text);
+  if (text != null) node.textContent = String(text);
   return node;
 }
 
-function clear(node) {
-  node.replaceChildren();
-}
-
-function addOption(select, value, label) {
-  const option = element("option", "", label);
-  option.value = value;
-  select.append(option);
-}
-
-function groupBy(items, getKey) {
-  const map = new Map();
-  for (const item of items) {
-    const key = getKey(item);
-    if (!map.has(key)) map.set(key, []);
-    map.get(key).push(item);
-  }
-  return map;
-}
-
-function normalize(value) {
-  return String(value || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLocaleLowerCase("de").trim();
-}
-
-function debounce(callback, delay = 140) {
-  let timeout;
-  return (...args) => {
-    window.clearTimeout(timeout);
-    timeout = window.setTimeout(() => callback(...args), delay);
-  };
-}
-
-function localeSort(a, b) {
-  return String(a).localeCompare(String(b), "de", { sensitivity: "base" });
-}
-
-function formatNumber(value) {
-  return new Intl.NumberFormat("de-DE").format(Number(value || 0));
-}
-
-function formatDecimal(value) {
-  return new Intl.NumberFormat("de-DE", { maximumFractionDigits: 2 }).format(Number(value));
-}
-
-function formatBytes(bytes) {
-  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
-  const units = ["B", "KB", "MB", "GB"];
-  const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
-  return `${new Intl.NumberFormat("de-DE", { maximumFractionDigits: index ? 1 : 0 }).format(bytes / (1024 ** index))} ${units[index]}`;
-}
-
-function parseIsoDate(value) {
-  if (!value) return null;
-  const match = String(value).match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  if (!match) return null;
-  return new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
-}
-
-function formatDate(value) {
-  const date = parseIsoDate(value);
-  return date ? new Intl.DateTimeFormat("de-DE", { day: "2-digit", month: "long", year: "numeric" }).format(date) : value || "Datum offen";
-}
-
-function formatDateRange(start, end) {
-  if (!start && !end) return "Datum nicht angegeben";
-  if (!end || start === end) return formatDate(start || end);
-  return `${formatDate(start)} – ${formatDate(end)}`;
-}
-
-function formatDateTime(value) {
-  if (!value) return "";
-  const date = new Date(value);
-  if (Number.isNaN(date.valueOf())) return value;
-  return new Intl.DateTimeFormat("de-DE", { dateStyle: "medium", timeStyle: "short" }).format(date);
-}
-
-function yearFromDate(value) {
-  return value ? String(value).slice(0, 4) : "";
-}
-
-function formatLocation(item) {
-  const parts = [item.venue_name, item.city, item.country_name].filter(Boolean);
-  return [...new Set(parts)].join(", ") || "Ort nicht angegeben";
-}
-
-function translateEnvironment(value) {
-  const translations = {
-    pool: "Pool",
-    ocean: "Ocean / Surf",
-    beach: "Beach",
-    open_water: "Open Water",
-    mixed: "Gemischt",
-  };
-  return translations[value] || value || "Nicht angegeben";
-}
-
-function translateGender(value) {
-  const translations = { Female: "Frauen", Male: "Männer", Mixed: "Mixed" };
-  return translations[value] || value || "";
-}
-
-function formatRound(result) {
-  const bits = [result.round_label];
-  if (result.heat_no != null) bits.push(`Lauf ${result.heat_no}`);
-  return bits.filter(Boolean).join(" · ") || "–";
-}
-
-function formatPerformance(result) {
-  if (result.time_text) return result.time_text;
-  if (result.raw_value_text && result.raw_value_text !== String(result.points ?? "")) return result.raw_value_text;
-  return "–";
-}
-
-function formatStatus(result) {
-  const bits = [];
-  if (result.status_code && result.status_code !== "FINISHED") bits.push(result.status_code);
-  if (result.disqualification_code) bits.push(`DSQ ${result.disqualification_code}`);
-  if (result.qualification_code) bits.push(result.qualification_code);
-  if (result.record_marker) bits.push(result.record_marker);
-  return bits.join(" · ") || "OK";
+function decorative(tag, className, text) {
+  const node = element(tag, className, text);
+  node.setAttribute("aria-hidden", "true");
+  return node;
 }
