@@ -86,7 +86,11 @@ progress { width: 100%; accent-color: var(--accent); }
 .competition-row:last-child { border-radius: 0 0 8px 8px; }
 .competition-row:only-child { border-radius: 8px; }
 .competition-row:hover, .event-card summary:hover { background: var(--active); }
-.competition-row small, .competition-row strong, .event-name small { display: block; overflow-wrap: anywhere; }
+.competition-row small, .event-name small { display: block; overflow-wrap: anywhere; }
+.competition-title { display: flex; align-items: flex-start; gap: .5em; overflow-wrap: anywhere; }
+.competition-title span { min-width: 0; }
+.country-flag { flex: none; margin-top: .2em; object-fit: contain; border-radius: 2px; background: var(--bg); }
+.detail-header .country-flag { width: 32px; height: 22px; }
 .competition-row small, .event-name small { color: var(--muted); font-size: .8rem; margin-top: 3px; }
 .competition-row .row-meta { color: var(--muted); font-size: .81rem; text-align: right; white-space: nowrap; }
 .chevron { color: var(--accent); font-size: 1.25rem; line-height: 1; }

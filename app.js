@@ -9,6 +9,7 @@ const loading = document.querySelector("#loading-view");
 const number = new Intl.NumberFormat("de-DE");
 const decimal = new Intl.NumberFormat("de-DE", { maximumFractionDigits: 2 });
 const collator = new Intl.Collator("de", { sensitivity: "base", numeric: true });
+const countryNames = new Intl.DisplayNames("en", { type: "region" });
 const scopes = [
   ["all", "Alles"],
   ["competition", "Wettkampf"],
@@ -91,7 +92,7 @@ function loadArchive() {
   `)[0];
   competitions = query(`
     SELECT c.id, c.parent_competition_id, c.name, c.edition_label, c.start_date, c.end_date, c.environment,
-           v.name AS venue, v.city, co.name AS country, cs.name AS series
+           v.name AS venue, v.city, co.name AS country, co.iso2 AS country_code, cs.name AS series
     FROM competitions c
     LEFT JOIN venues v ON v.id = c.venue_id
     LEFT JOIN countries co ON co.id = v.country_id
@@ -125,6 +126,10 @@ function loadArchive() {
     const events = eventsByCompetition.get(competition.id) || [];
     competition.year = [competition.start_date, competition.edition_label, competition.name]
       .join(" ").match(/\b(?:19|20)\d{2}\b/)?.[0] || "";
+    competition.country_code = hostCountryCode(competition);
+    if (!competition.country && competition.country_code) {
+      competition.country = countryNames.of(competition.country_code);
+    }
     competition.categories = new Set(events.flatMap(eventCategories));
     const formats = namedFormats([competition.name, competition.series].join(" "));
     formats.forEach((format) => competition.categories.add(format));
@@ -149,6 +154,38 @@ function loadArchive() {
     competition.terms = normalize([competition.name, competition.edition_label, competition.year,
       competition.city, competition.country, competition.venue, competition.series, competition.categoryLabel].join(" "));
   }
+}
+
+// Host locations missing from venues.country_id. Scope each fallback to known editions.
+function hostCountryCode(competition) {
+  const code = competition.country_code?.trim().toUpperCase();
+  if (code && /^[A-Z]{2}$/.test(code)) return code;
+
+  const { year } = competition;
+  const name = normalize(competition.name);
+  if (
+    /^rlss uk national speed lifesaving championships (2019|2022|2024)$/.test(name) ||
+    /^(commonwealth festival of lifesaving 2019|slsgb gbr team trials 2026)$/.test(name) ||
+    (year === "2025" && name === "commonwealth lifesaving championships") ||
+    (year === "2011" && name === "british life saving open pool championships")
+  ) return "GB";
+  if (
+    /^ils (?:lwc|lifesaving world championships) adelaide 2018 - /.test(name) ||
+    /^lifesaving world championships rescue 2012 - /.test(name) ||
+    /^(irb world championships 2012|australian (?:masters|open) championships 2024)$/.test(name) ||
+    /^(2025 sharkskin nsw irb state championship|202[45] nsw pool lifesaving championships|2022 nsw state pool rescue championships)$/.test(name)
+  ) return "AU";
+  if (/^lifesaving world championships rescue 2014 - /.test(name)) return "FR";
+  if (/^(bastogne sur invitation 2026|championnat de belgique de sauvetage sportif en eau libre 2026)$/.test(name)) return "BE";
+  if (name === "water safety ireland national still water championships 2026" ||
+      (year === "2019" && /^(?:(?:uls conn regional nippers|uls conn regionals juniors|leinster regional nippers|munster regional nippers)(?: 2019)?|leinster 2019)$/.test(name))) {
+    return "IE";
+  }
+  if (/^201[1-3]$/.test(year) && /^(lifesaving pool meeting breda|ilse wedstrijden heythuysen|(?:oud- )?nieuwjaarswedstrijden weert|oudjaarswedstrijden weert)$/.test(name)) return "NL";
+  if (name === "copa de roses 2023") return "ES";
+  if (name === "wls interclub championships 1990") return "DE";
+  if (name === "world life saving championships 1986 - interclub teams") return "CA";
+  return "";
 }
 
 function namedFormats(text) {
@@ -264,13 +301,28 @@ function competitionLink(competition, scope, q) {
   const params = scope ? "?" + new URLSearchParams({ q, scope }).toString() : "";
   link.href = `#/wettkampf/${competition.id}${params}`;
   const name = element("span");
-  name.append(element("strong", "", competition.name));
+  name.append(competitionTitle(competition, "strong"));
   const place = [dateLabel(competition), ...new Set([competition.city, competition.country].filter(Boolean)), competition.categoryLabel].filter(Boolean).join(" · ");
   if (place) name.append(element("small", "", place));
   link.append(name, element("span", "row-meta",
     `${number.format(competition.eventCount)} Austragungen · ${number.format(competition.resultCount)} Ergebnisse`),
   decorative("span", "chevron", "›"));
   return link;
+}
+
+function competitionTitle(competition, tag) {
+  const title = element(tag, "competition-title");
+  if (competition.country_code) {
+    const flag = element("img", "country-flag");
+    flag.alt = "";
+    flag.width = 24;
+    flag.height = 16;
+    flag.addEventListener("error", () => flag.remove(), { once: true });
+    flag.src = `flags/${competition.country_code.toLowerCase()}.png`;
+    title.append(flag);
+  }
+  title.append(element("span", "", competition.name));
+  return title;
 }
 
 function renderCompetition(competition, params) {
@@ -287,7 +339,7 @@ function renderCompetition(competition, params) {
   document.title = `${competition.name} · Lifesaving`;
   const header = element("header", "detail-header");
   const meta = [dateLabel(competition), ...new Set([competition.venue, competition.city, competition.country].filter(Boolean)), competition.categoryLabel].filter(Boolean);
-  header.append(element("h1", "", competition.name));
+  header.append(competitionTitle(competition, "h1"));
   if (meta.length) header.append(element("p", "muted", meta.join(" · ")));
   const results = createEventsPanel(competition.id, params);
   const panels = [["Ergebnisse", results]];

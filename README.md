@@ -43,3 +43,9 @@ Die Oberfläche enthält keinen Download-Link zur Datenbank. Da das Repository u
 ## Drittanbieter-Code
 
 `vendor/sql.js/` enthält sql.js 1.14.2 einschließlich der MIT-Lizenz. Die Dateien werden zusammen mit der Website über GitHub Pages ausgeliefert; es wird kein externes CDN verwendet.
+
+## Austragungsländer
+
+Die Website übernimmt den Ländercode aus dem Austragungsort in SQLite. Bei fehlenden Codes ergänzt `hostCountryCode` bekannte Ausgaben anhand von Ortsangaben und Verbandsarchiven. Für Ulster/Connacht 2019 beruht die Zuordnung auf der irischen Verbandsregion. Der genaue Austragungsort steht im Archiv nicht. [International Life Saving Federation](https://www.ilsf.org/lifesaving-sport/results/), [Royal Life Saving Society Commonwealth](https://www.rlsscommonwealth.org/history-of-the-commonwealth-lifesaving-championships/), [Water Safety Ireland](https://watersafety.ie/competitions-results/), [Ligue Francophone Belge de Sauvetage](https://lfbs.onerp.be/ZNLDocs.olp?id=36)
+
+Die gemeinfreien PNG-Flaggen liegen in `flags/`. [Flagpedia](https://flagpedia.net/download)
